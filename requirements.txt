@@ -1,2 +1,4 @@
 PyQt6==6.4.2
 SQLAlchemy==2.0.25
+pytest==7.4.0
+pytest-qt==4.2.0
