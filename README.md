@@ -40,6 +40,7 @@
 Python 3.10+
 SQLite (встроен в Python)
 Git
+
 ┌─────────────────────────────┐
 |        User Interface       |
 |        (View / GUI)         |
@@ -64,21 +65,22 @@ Git
 |  - Шифрование / DB Access   |
 |  - Конфигурации             |
 └─────────────────────────────┘
+
 Инструкция по созданию виртуального окружения
-# 1. Клонируем репозиторий
+1. Клонируем репозиторий
 git clone https://github.com/your_username/cryptosafe-manager.git
 cd cryptosafe-manager
 
-# 2. Создаём виртуальное окружение
+2. Создаём виртуальное окружение
 python -m venv venv
 
-# 3. Активируем его
-# Windows
+3. Активируем его
+Windows
 venv\Scripts\activate
 
-# macOS/Linux
+macOS/Linux
 source venv/bin/activate
 
-# 4. Устанавливаем зависимости
+4. Устанавливаем зависимости
 pip install -r requirements.txt
 
