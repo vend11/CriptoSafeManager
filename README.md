@@ -21,3 +21,13 @@
 ### Как запустить:
 
 Нужно просто запустить файл `main_window.py`.
+graph TD
+    User([Пользователь]) -->|Взаимодействие| View[View: PyQt6 интерфейс]
+    View -->|Действия/Данные| Controller[Controller: Логика & События]
+    Controller -->|Запросы данных| Model[Model: SQLAlchemy]
+    Model -->|Данные| Controller
+    Controller -->|Обновление| View
+    
+    subgraph Data
+    Model -->|SQLite File| DB[(cryptosafe.db)]
+    end
