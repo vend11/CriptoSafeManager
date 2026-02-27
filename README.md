@@ -62,13 +62,6 @@ cd CriptoSafeManager
 2. Создаём виртуальное окружение
 python -m venv venv
 
-3. Активируем его
-Windows
-venv\Scripts\activate
-
-macOS/Linux
-source venv/bin/activate
-
-4. Устанавливаем зависимости
+3. Устанавливаем зависимости
 pip install -r requirements.txt
 
