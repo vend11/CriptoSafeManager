@@ -54,14 +54,4 @@ flowchart TD
     Model --> Controller
     Controller --> View
 
-Инструкция по созданию виртуального окружения
-1. Клонируем репозиторий
-git clone https://github.com/vend11/CriptoSafeManager
-cd CriptoSafeManager
-
-2. Создаём виртуальное окружение
-python -m venv venv
-
-3. Устанавливаем зависимости
-pip install -r requirements.txt
 
