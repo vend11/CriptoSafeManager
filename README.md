@@ -34,6 +34,17 @@
 
 Спринт 8 — Деплой и документация: финальная сборка, установки, бэкапы.
 
-graph TD    User[Пользователь]        subgraph View [Графический интерфейс]        GUI[src/gui]    end        subgraph Controller [Управление]        State[StateManager]        Config[ConfigManager]    end        subgraph Model [Модель и Данные]        DB[src/database]        Crypto[src/core/crypto]    end    User -->|Ввод данных| GUI    GUI -->|Запрос| DB    DB -->|Шифрование| Crypto    DB -->|Ответ| GUI    GUI -->|Состояние| State    GUI -->|Настройки| Config    Config -->|Сохранение| DB
+View (Представление) — src/gui/
+Отвечает за отображение интерфейса (Tkinter).
+Содержит виджеты, главное окно и диалоги.
+Поток: Пользователь -> GUI -> Controller/Model.
+Controller (Управление) — src/core/
+Управляет логикой приложения и состоянием.
+EventManager обрабатывает события.
+StateManager отслеживает сессию пользователя.
+Model (Модель) — src/database/ + src/core/crypto/
+Работает с данными и безопасностью.
+DatabaseHelper (SQLite) — хранение.
+CryptoService (AES-256) — шифрование.
 
 
