@@ -1,20 +1,43 @@
-from sqlalchemy import Column, Integer, String, LargeBinary, DateTime, Boolean
-from sqlalchemy.orm import declarative_base
-from datetime import datetime
+SCHEMA_V1 = """
+-- Таблица паролей
+CREATE TABLE IF NOT EXISTS vault_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    username TEXT,
+    encrypted_password BLOB,
+    url TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tags TEXT
+);
 
-Base = declarative_base()
+-- Логи
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    entry_id INTEGER,
+    details TEXT,
+    signature BLOB
+);
 
-class VaultEntry(Base):
-    __tablename__ = 'vault_entries'
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    username = Column(String)
-    encrypted_password = Column(LargeBinary, nullable=False)
-    url = Column(String)
-    notes = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+-- Настройки
+CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    setting_key TEXT UNIQUE NOT NULL,
+    setting_value TEXT,
+    encrypted INTEGER DEFAULT 0
+);
 
-# Таблицы для будущих спринтов
-class AuditLog(Base): __tablename__ = 'audit_log'; id = Column(Integer, primary_key=True); action = Column(String)
-class Setting(Base): __tablename__ = 'settings'; id = Column(Integer, primary_key=True); setting_key = Column(String)
-class KeyStore(Base): __tablename__ = 'key_store'; id = Column(Integer, primary_key=True); key_type = Column(String)
+-- Ключи(заглушка)
+CREATE TABLE IF NOT EXISTS key_store (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_type TEXT,
+    salt BLOB,
+    hash BLOB,
+    params TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_title ON vault_entries(title);
+"""
