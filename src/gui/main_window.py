@@ -1,93 +1,117 @@
-import sys
-from datetime import datetime
-from PyQt6.QtWidgets import QApplication, QMainWindow, QStatusBar, QMessageBox, QTableWidgetItem
-from src.database.db import init_db, backup_placeholder
-from src.core.events import emit  # EVT-1
-from src.gui.widgets.secure_table import SecureTable
-from src.gui.widgets.entry_dialog import EntryDialog
+import tkinter as tk
+from tkinter import messagebox
+from .widgets.secure_table import SecureTable
+from .widgets.audit_log_viewer import AuditLogViewer
+from .settings_dialog import SettingsDialog
+from .setup_wizard import SetupWizard
 
 
-class MainWindow(QMainWindow):
-    def __init__(self):
+class MainWindow(tk.Tk):
+    def __init__(self, config, state, db, events):
         super().__init__()
-        init_db()
+        self.title("CryptoSafe Manager")
+        self.geometry("900x600")
 
-        self.setWindowTitle("CryptoSafe Manager")
-        self.resize(1000, 600)
+        self.app_config = config
+        self.state = state
+        self.db = db
+        self.events = events
 
-        # GUI-2: Таблица для записей
-        self.table = SecureTable()
-        self.setCentralWidget(self.table)
+        self._create_menu()
+        self._create_main_area()
+        self._create_status_bar()
 
-        # GUI-1: Строка состояния
-        self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Статус: Разблокировано | Буфер: 00:00")
+        self.after(100, self._check_first_run)
 
-        self._build_menu()
+    def _create_menu(self):
+        """Создание меню"""
+        menubar = tk.Menu(self)
 
-    def _build_menu(self):
-        mb = self.menuBar()
+        #Меню Файл
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Создать", command=self.not_implemented)
+        file_menu.add_command(label="Открыть", command=self.not_implemented)
+        file_menu.add_command(label="Резервная копия", command=self.create_backup)
+        file_menu.add_separator()
+        file_menu.add_command(label="Выход", command=self.quit)
+        menubar.add_cascade(label="Файл", menu=file_menu)
 
-        # Меню Файл
-        file_menu = mb.addMenu("Файл")
-        # Привязываем создание записи к пункту "Создать"
-        file_menu.addAction("Создать").triggered.connect(self._create_new_entry)
-        file_menu.addAction("Открыть")
-        file_menu.addAction("Резервная копия").triggered.connect(self._backup)
-        file_menu.addAction("Выход").triggered.connect(self.close)
+        #Меню Правка
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Добавить", command=self.add_entry_dialog)
+        edit_menu.add_command(label="Изменить", command=self.not_implemented)
+        edit_menu.add_command(label="Удалить", command=self.not_implemented)
+        menubar.add_cascade(label="Правка", menu=edit_menu)
 
-        # Меню Правка
-        edit_menu = mb.addMenu("Правка")
-        edit_menu.addAction("Добавить").triggered.connect(self._create_new_entry)
-        edit_menu.addAction("Изменить")
-        edit_menu.addAction("Удалить").triggered.connect(self._delete_entry)
+        #Меню Вид
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="Логи аудита", command=self.show_logs)
+        view_menu.add_command(label="Настройки", command=self.show_settings)
+        menubar.add_cascade(label="Вид", menu=view_menu)
 
-        mb.addMenu("Вид")
-        mb.addMenu("Справка")
+        #Меню Справка
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="О программе", command=self.show_about)
+        menubar.add_cascade(label="Справка", menu=help_menu)
 
-    def _create_new_entry(self):
-        """Логика создания новой записи согласно EVT-1"""
-        dialog = EntryDialog(self)
-        if dialog.exec():
-            data = dialog.get_data()
+        self.config(menu=menubar)
 
-            # Валидация ввода (SEC-2)
-            if not data['title']:
-                QMessageBox.warning(self, "Ошибка", "Название не может быть пустым!")
-                return
+    def _create_main_area(self):
+        #Центральный виджет таблицы
+        self.table = SecureTable(self)
+        self.table.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.refresh_table()
 
-            # Добавление в таблицу (визуализация)
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+    def _create_status_bar(self):
+        #Строка состояния с таймером
+        self.status_var = tk.StringVar()
+        # Заглушка таймера буфера обмена
+        self.status_var.set("Статус: Заблокировано | Буфер: Очищен (00с)")
+        status = tk.Label(self, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        status.pack(side=tk.BOTTOM, fill=tk.X)
 
-            # Заполнение колонок (ID, Название, Логин, URL, Дата, Теги)
-            self.table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-            self.table.setItem(row, 1, QTableWidgetItem(data['title']))
-            self.table.setItem(row, 2, QTableWidgetItem(data['login']))
-            self.table.setItem(row, 3, QTableWidgetItem(data['url']))
-            self.table.setItem(row, 4, QTableWidgetItem(datetime.now().strftime("%Y-%m-%d")))
-            self.table.setItem(row, 5, QTableWidgetItem(data['tags']))
-
-            # Публикация события в систему (EVT-1)
-            emit("EntryAdded", data)
-            self.statusBar().showMessage("Запись успешно создана", 3000)
-
-    def _delete_entry(self):
-        current_row = self.table.currentRow()
-        if current_row != -1:
-            self.table.removeRow(current_row)
-            emit("EntryDeleted")  # EVT-1
+    def _check_first_run(self):
+        # Проверяем, есть ли ключи
+        keys = self.db.fetch_all("SELECT id FROM key_store")
+        if not keys:
+            # Передаем db в мастер настройки, чтобы он мог сохранить состояние
+            wizard = SetupWizard(self, self.db, self._on_setup_complete)
+            wizard.grab_set()
         else:
-            QMessageBox.warning(self, "Ошибка", "Выберите запись для удаления")
+            self.status_var.set("Статус: Готов | Буфер: --")
 
-    def _backup(self):
-        backup_placeholder()  # Исправлено: ссылка на DB-4
-        QMessageBox.information(self, "Успех", "Резервная копия создана.")
+    def _on_setup_complete(self, password, db_path):
+        if password:
+            self.status_var.set("Статус: Разблокировано | Буфер: Активен")
+            self.events.publish("UserLoggedIn", "admin")
+            messagebox.showinfo("Успех", "Хранилище успешно создано!")
+        else:
+            self.quit()
 
+    def add_entry_dialog(self):
+        # Диалог добавления (заглушка)
+        self.db.add_vault_entry("New Entry", "user", "password123", "http://url.com")
+        self.refresh_table()
+        self.events.publish("EntryAdded", "New Entry")
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    # Здесь можно добавить вызов SetupWizard (GUI-3) перед основным окном
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    def refresh_table(self):
+        rows = self.db.fetch_all("SELECT id, title, username, url FROM vault_entries")
+        data = [(r['id'], r['title'], r['username'], r['url']) for r in rows]
+        self.table.update_data(data)
+
+    def create_backup(self):
+        path = self.db.create_backup()
+        if path:
+            messagebox.showinfo("Резервная копия", f"Сохранено в:\n{path}")
+
+    def show_logs(self):
+        AuditLogViewer(self)
+
+    def show_settings(self):
+        SettingsDialog(self, self.app_config)
+
+    def show_about(self):
+        messagebox.showinfo("О программе", "CryptoSafe Manager v1.0\nСпринт 1")
+
+    def not_implemented(self):
+        messagebox.showinfo("Информация", "Функционал в разработке (будущие спринты)")
