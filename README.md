@@ -34,7 +34,6 @@
 
 Спринт 8 — Деплой и документация: финальная сборка, установки, бэкапы.
 
-
-graph LR    subgraph View [Графический интерфейс (View)]        GUI[src/gui/]        Widgets[Виджеты и Окна]    end    subgraph Controller [Управление (Controller)]        Main[main.py]        State[StateManager]        Events[EventSystem]        Config[ConfigManager]    end    subgraph Model [Модель (Model)]        Core[Core Logic]        Crypto[Crypto Service]        DB[Database Helper]    end    %% Основные потоки данных        %% Пользователь -> View    User((User)) -->|Действие| GUI        %% View -> Controller/Model    GUI -->|Запрос данных| DB    GUI -->|Сохранить настройки| Config    GUI -->|Событие (например, Удалить)| Events        %% Controller -> Model    State -->|Состояние сессии| GUI    Events -->|Уведомление| GUI    Config -->|Чтение настроек| DB        %% Model Internal    DB -->|Шифрование| Crypto    Crypto -->|Возвращает байты| DB    %% Стилизация    classDef view fill:#e1f5fe,stroke:#01579b,stroke-width:2px;    classDef controller fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;    classDef model fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;        class GUI,Widgets view;    class Main,State,Events,Config controller;    class Core,Crypto,DB model;
+graph TD    User[Пользователь]        subgraph View [Графический интерфейс]        GUI[src/gui]    end        subgraph Controller [Управление]        State[StateManager]        Config[ConfigManager]    end        subgraph Model [Модель и Данные]        DB[src/database]        Crypto[src/core/crypto]    end    User -->|Ввод данных| GUI    GUI -->|Запрос| DB    DB -->|Шифрование| Crypto    DB -->|Ответ| GUI    GUI -->|Состояние| State    GUI -->|Настройки| Config    Config -->|Сохранение| DB
 
 
