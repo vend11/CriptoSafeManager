@@ -34,22 +34,7 @@
 
 Спринт 8 — Деплой и документация: финальная сборка, установки, бэкапы.
 
-⚙️ Настройка и запуск (Development Setup):
-Python 3.10+
-SQLite (встроен в Python)
-Git
 
-flowchart TD
-
-    User[User]
-    View[View\n(GUI)]
-    Controller[Controller]
-    Model[Model\n(Database + Crypto)]
-
-    User --> View
-    View --> Controller
-    Controller --> Model
-    Model --> Controller
-    Controller --> View
+graph LR    subgraph View [Графический интерфейс (View)]        GUI[src/gui/]        Widgets[Виджеты и Окна]    end    subgraph Controller [Управление (Controller)]        Main[main.py]        State[StateManager]        Events[EventSystem]        Config[ConfigManager]    end    subgraph Model [Модель (Model)]        Core[Core Logic]        Crypto[Crypto Service]        DB[Database Helper]    end    %% Основные потоки данных        %% Пользователь -> View    User((User)) -->|Действие| GUI        %% View -> Controller/Model    GUI -->|Запрос данных| DB    GUI -->|Сохранить настройки| Config    GUI -->|Событие (например, Удалить)| Events        %% Controller -> Model    State -->|Состояние сессии| GUI    Events -->|Уведомление| GUI    Config -->|Чтение настроек| DB        %% Model Internal    DB -->|Шифрование| Crypto    Crypto -->|Возвращает байты| DB    %% Стилизация    classDef view fill:#e1f5fe,stroke:#01579b,stroke-width:2px;    classDef controller fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;    classDef model fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;        class GUI,Widgets view;    class Main,State,Events,Config controller;    class Core,Crypto,DB model;
 
 
