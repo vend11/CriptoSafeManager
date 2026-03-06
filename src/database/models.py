@@ -1,10 +1,10 @@
 SCHEMA_V1 = """
--- Таблица паролей
+-- Таблица записей хранилища
 CREATE TABLE IF NOT EXISTS vault_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     username TEXT,
-    encrypted_password BLOB,
+    encrypted_password TEXT,  
     url TEXT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -12,17 +12,17 @@ CREATE TABLE IF NOT EXISTS vault_entries (
     tags TEXT
 );
 
--- Логи
+-- Таблица аудита
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     entry_id INTEGER,
     details TEXT,
-    signature BLOB
+    signature TEXT  
 );
 
--- Настройки
+-- Таблица настроек
 CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     setting_key TEXT UNIQUE NOT NULL,
@@ -30,14 +30,21 @@ CREATE TABLE IF NOT EXISTS settings (
     encrypted INTEGER DEFAULT 0
 );
 
--- Ключи(заглушка)
+-- Таблица для хранения ключевых метаданных
 CREATE TABLE IF NOT EXISTS key_store (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     key_type TEXT,
-    salt BLOB,
-    hash BLOB,
+    salt BLOB,       
+    hash BLOB,       
     params TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_vault_title ON vault_entries(title);
+-- Индексы для быстрого поиска
+CREATE INDEX IF NOT EXISTS idx_vault_entries_title ON vault_entries(title);
+CREATE INDEX IF NOT EXISTS idx_vault_entries_username ON vault_entries(username);
+CREATE INDEX IF NOT EXISTS idx_vault_entries_tags ON vault_entries(tags);
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entry_id ON audit_log(entry_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings(setting_key);
+CREATE INDEX IF NOT EXISTS idx_key_store_type ON key_store(key_type);
 """
