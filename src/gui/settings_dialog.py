@@ -1,46 +1,33 @@
-from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+import tkinter as tk
+from tkinter import ttk
 
-
-class SecureTable(QTableWidget):
-    def __init__(self, parent=None):
+class SettingsDialog(tk.Toplevel):
+    """Диалог настроек"""
+    def __init__(self, parent, config):
         super().__init__(parent)
-        self.headers = ["ID", "Название", "Логин", "URL", "Дата создания", "Теги"]
-        self.setColumnCount(len(self.headers))
-        self.setHorizontalHeaderLabels(self.headers)
+        self.title("Настройки")
+        self.geometry("500x400")
+        self.config = config
 
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        self.add_test_data()
+        # Вкладка Безопасность
+        sec_frame = tk.Frame(notebook)
+        notebook.add(sec_frame, text="Безопасность")
+        tk.Label(sec_frame, text="Таймаут буфера обмена (сек):").pack(pady=5)
+        tk.Entry(sec_frame).pack(pady=5)
+        tk.Label(sec_frame, text="Авто-блокировка (мин):").pack(pady=5)
+        tk.Entry(sec_frame).pack(pady=5)
 
-    def add_test_data(self):
-        test_entries = [
-            ("1", "Google", "user@gmail.com", "google.com", "2024-05-20", "work"),
-            ("2", "GitHub", "dev_admin", "github.com", "2024-05-21", "dev")
-        ]
-        self.setRowCount(len(test_entries))
-        for row, data in enumerate(test_entries):
-            for col, value in enumerate(data):
-                self.setItem(row, col, QTableWidgetItem(value))
-from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        # Вкладка Внешний вид
+        app_frame = tk.Frame(notebook)
+        notebook.add(app_frame, text="Внешний вид")
+        tk.Label(app_frame, text="Тема:").pack(pady=5)
+        tk.Combobox(app_frame, values=["Light", "Dark"]).pack(pady=5)
 
-
-class SecureTable(QTableWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.headers = ["ID", "Название", "Логин", "URL", "Дата создания", "Теги"]
-        self.setColumnCount(len(self.headers))
-        self.setHorizontalHeaderLabels(self.headers)
-
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-
-        self.add_test_data()
-
-    def add_test_data(self):
-        test_entries = [
-            ("1", "Google", "user@gmail.com", "google.com", "2024-05-20", "work"),
-            ("2", "GitHub", "dev_admin", "github.com", "2024-05-21", "dev")
-        ]
-        self.setRowCount(len(test_entries))
-        for row, data in enumerate(test_entries):
-            for col, value in enumerate(data):
-                self.setItem(row, col, QTableWidgetItem(value))
+        # Вкладка Дополнительно
+        adv_frame = tk.Frame(notebook)
+        notebook.add(adv_frame, text="Дополнительно")
+        tk.Label(adv_frame, text="Путь к резервным копиям:").pack(pady=5)
+        tk.Entry(adv_frame).pack(pady=5)
