@@ -7,13 +7,12 @@ from src.gui.main_window import MainWindow
 
 
 def main():
-    print(">>> Запуск CryptoSafe Manager <<<")
+    print(" Запуск CryptoSafe Manager ")
 
     # 1. Инициализация ядра
     config = ConfigManager(env='development')
     events = EventSystem()
 
-    # ИСПРАВЛЕНО: Передаем events в StateManager
     state = StateManager(events)
 
     # 2. База данных
