@@ -67,6 +67,8 @@ class DatabaseHelper:
     def query(self, sql: str, params: tuple = ()) -> list:
         cur = self.execute(sql, params)
         return cur.fetchall()
+    def fetch_all(self, sql: str, params: tuple = ()) -> list:
+        return self.query(sql, params)
 
     def get_user_version(self) -> int:
         with self.connection() as conn:
@@ -97,32 +99,38 @@ class DatabaseHelper:
         cur = conn.cursor()
         cur.executescript(SCHEMA_V1)
         conn.commit()
+        print("[DB] Миграция V1 применена")
 
     def add_vault_entry(self, title: str, username: str, password_str: str, url: str = ""):
-        # Шифруем и кодируем в Base64
         encrypted_bytes = self.crypto.encrypt(password_str.encode('utf-8'), self._temp_key)
         encrypted_str = base64.b64encode(encrypted_bytes).decode('utf-8')
 
         query = "INSERT INTO vault_entries (title, username, encrypted_password, url) VALUES (?, ?, ?, ?)"
         self.execute(query, (title, username, encrypted_str, url), commit=True)
+        print(f"[DB] Запись '{title}' добавлена.")
 
     def delete_entry(self, entry_id: int):
         self.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,), commit=True)
+        print(f"[DB] Запись ID {entry_id} удалена.")
 
     def get_decrypted_password(self, entry_id: int) -> Optional[str]:
         rows = self.query("SELECT encrypted_password FROM vault_entries WHERE id=?", (entry_id,))
         if rows:
             encrypted_str = rows[0]['encrypted_password']
-            # Декодируем и расшифровываем
-            encrypted_bytes = base64.b64decode(encrypted_str)
-            decrypted_bytes = self.crypto.decrypt(encrypted_bytes, self._temp_key)
-            return decrypted_bytes.decode('utf-8')
+            try:
+                # Декодируем Base64 и расшифровываем
+                encrypted_bytes = base64.b64decode(encrypted_str)
+                decrypted_bytes = self.crypto.decrypt(encrypted_bytes, self._temp_key)
+                return decrypted_bytes.decode('utf-8')
+            except Exception:
+                return None
         return None
-
     def create_backup(self, backup_dir: str = 'backups') -> Optional[str]:
+        """Заглушка для Спринта 8."""
         print("[DB] Создание бэкапа... (Заглушка)")
         return "stub_backup.db"
 
     def restore_backup(self, backup_path: str) -> bool:
+        """Заглушка для Спринта 8."""
         print(f"[DB] Восстановление из {backup_path}... (Заглушка)")
         return True
