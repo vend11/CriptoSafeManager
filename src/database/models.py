@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS vault_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     username TEXT,
-    encrypted_password TEXT,  -- ИЗМЕНЕНО: было BLOB, стало TEXT (для Base64)
+    encrypted_password TEXT,
     url TEXT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
