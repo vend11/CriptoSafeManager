@@ -104,17 +104,29 @@ class DatabaseHelper:
         print("[DB] Миграция V1 применена")
 
     def _migration_2_ensure_settings(self, conn: sqlite3.Connection) -> None:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                setting_key TEXT UNIQUE NOT NULL,
-                setting_value TEXT,
-                encrypted INTEGER DEFAULT 0
-            );
-        """)
-        conn.commit()
-        print("[DB] Миграция V2 проверена")
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    setting_key TEXT UNIQUE NOT NULL,
+                    setting_value TEXT,
+                    encrypted INTEGER DEFAULT 0
+                );
+            """)
+            default_settings = [
+                ('clipboard_timeout', '30'),
+                ('auto_lock_timeout', '300')
+            ]
+            cur.executemany(
+                "INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)",
+                default_settings
+            )
+            conn.commit()
+            print("[DB] Миграция V2: Таблица настроек проверена, значения по умолчанию добавлены")
+
+    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+            rows = self.query("SELECT setting_value FROM settings WHERE setting_key=?", (key,))
+            return rows[0]['setting_value'] if rows else default
 
     def add_vault_entry(self, title: str, username: str, password_str: str, url: str = ""):
         # Шифруем и кодируем в Base64
