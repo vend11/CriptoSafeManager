@@ -11,7 +11,7 @@ def test_tables_creation(temp_db):
 
 def test_migration_version(temp_db):
     rows = temp_db.query("PRAGMA user_version")
-    assert rows[0][0] == 1
+    assert rows[0][0] == 2
 
 def test_encryption_is_base64(temp_db):
     plain_password = "my_secret_pass"
