@@ -22,10 +22,24 @@ class ConfigManager:
 
         if self.db:
             try:
-                val = self.db.get_setting(key)
-                if val is not None:
+                rows = self.db.query("SELECT setting_value FROM settings WHERE setting_key=?", (key,))
+                if rows:
+                    val = rows[0][0]
                     return int(val) if val.isdigit() else val
             except Exception as e:
                 print(f"[CONFIG] Ошибка чтения ключа {key}: {e}")
 
         return default
+
+    def set(self, key, value, encrypted=False):
+        self.settings[key] = value
+
+        if self.db:
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO settings (setting_key, setting_value, encrypted) VALUES (?, ?, ?)",
+                    (key, str(value), 1 if encrypted else 0),
+                    commit=True
+                )
+            except Exception as e:
+                print(f"[CONFIG] Ошибка записи ключа {key}: {e}")
