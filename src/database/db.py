@@ -1,5 +1,4 @@
 import sqlite3
-import os
 import secrets
 import base64
 from pathlib import Path
@@ -8,6 +7,7 @@ from contextlib import contextmanager
 from typing import Callable, List, Optional
 from .models import SCHEMA_V1
 from src.core.crypto.placeholder import AES256Placeholder
+
 
 class DatabaseHelper:
     def __init__(self, db_path: str, size: int = 4):
@@ -24,9 +24,10 @@ class DatabaseHelper:
         self.crypto = AES256Placeholder()
         self._temp_key = secrets.token_bytes(16)
 
-        # Миграции
+        # Миграции (добавлена вторая миграция для надежности)
         self._migrations: List[Callable[[sqlite3.Connection], None]] = [
             self._migration_1_initial_schema,
+            self._migration_2_ensure_settings,
         ]
         self.migrate()
 
@@ -67,6 +68,8 @@ class DatabaseHelper:
     def query(self, sql: str, params: tuple = ()) -> list:
         cur = self.execute(sql, params)
         return cur.fetchall()
+
+    # Метод-обертка для совместимости с GUI
     def fetch_all(self, sql: str, params: tuple = ()) -> list:
         return self.query(sql, params)
 
@@ -101,7 +104,24 @@ class DatabaseHelper:
         conn.commit()
         print("[DB] Миграция V1 применена")
 
+    def _migration_2_ensure_settings(self, conn: sqlite3.Connection) -> None:
+        """Гарантирует наличие таблицы settings (исправление для тестов)."""
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                setting_key TEXT UNIQUE NOT NULL,
+                setting_value TEXT,
+                encrypted INTEGER DEFAULT 0
+            );
+        """)
+        conn.commit()
+        print("[DB] Миграция V2 проверена")
+
+    # --- Логика приложения ---
+
     def add_vault_entry(self, title: str, username: str, password_str: str, url: str = ""):
+        # Шифруем и кодируем в Base64
         encrypted_bytes = self.crypto.encrypt(password_str.encode('utf-8'), self._temp_key)
         encrypted_str = base64.b64encode(encrypted_bytes).decode('utf-8')
 
@@ -125,6 +145,9 @@ class DatabaseHelper:
             except Exception:
                 return None
         return None
+
+    # --- DB-4: Заглушки бэкапа ---
+
     def create_backup(self, backup_dir: str = 'backups') -> Optional[str]:
         """Заглушка для Спринта 8."""
         print("[DB] Создание бэкапа... (Заглушка)")
