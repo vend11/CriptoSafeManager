@@ -1,4 +1,5 @@
 import os
+import base64
 
 def test_tables_creation(temp_db):
     result = temp_db.query("SELECT name FROM sqlite_master WHERE type='table'")
@@ -20,16 +21,16 @@ def test_encryption_is_base64(temp_db):
     assert len(rows) == 1
     
     stored_value = rows[0]['encrypted_password']
+
     assert isinstance(stored_value, str)
+
     assert stored_value != plain_password
-    
-    import base64
+
     try:
         decoded = base64.b64decode(stored_value)
         assert len(decoded) > 0
     except Exception:
-        # ИСПРАВЛЕНО: Скобки для многострочного аргумента
-        assert False, 
+        assert False, "Данные не являются валидной строкой Base64"
 
 def test_backup_stub(temp_db):
     result = temp_db.create_backup()
