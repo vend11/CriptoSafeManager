@@ -69,7 +69,6 @@ class DatabaseHelper:
         cur = self.execute(sql, params)
         return cur.fetchall()
 
-    # Метод-обертка для совместимости с GUI
     def fetch_all(self, sql: str, params: tuple = ()) -> list:
         return self.query(sql, params)
 
@@ -105,7 +104,6 @@ class DatabaseHelper:
         print("[DB] Миграция V1 применена")
 
     def _migration_2_ensure_settings(self, conn: sqlite3.Connection) -> None:
-        """Гарантирует наличие таблицы settings (исправление для тестов)."""
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -117,8 +115,6 @@ class DatabaseHelper:
         """)
         conn.commit()
         print("[DB] Миграция V2 проверена")
-
-    # --- Логика приложения ---
 
     def add_vault_entry(self, title: str, username: str, password_str: str, url: str = ""):
         # Шифруем и кодируем в Base64
@@ -146,14 +142,10 @@ class DatabaseHelper:
                 return None
         return None
 
-    # --- DB-4: Заглушки бэкапа ---
-
     def create_backup(self, backup_dir: str = 'backups') -> Optional[str]:
-        """Заглушка для Спринта 8."""
         print("[DB] Создание бэкапа... (Заглушка)")
         return "stub_backup.db"
 
     def restore_backup(self, backup_path: str) -> bool:
-        """Заглушка для Спринта 8."""
         print(f"[DB] Восстановление из {backup_path}... (Заглушка)")
         return True
