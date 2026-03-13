@@ -28,7 +28,8 @@ def test_encryption_is_base64(temp_db):
         decoded = base64.b64decode(stored_value)
         assert len(decoded) > 0
     except Exception:
-        assert False,
+        # ИСПРАВЛЕНО: Скобки для многострочного аргумента
+        assert False, 
 
 def test_backup_stub(temp_db):
     result = temp_db.create_backup()
