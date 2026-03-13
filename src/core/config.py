@@ -10,7 +10,6 @@ class ConfigManager:
         self.db: Optional["DatabaseHelper"] = None
         self.settings = {}
 
-        # CFG-3: Разные настройки для разных окружений
         if self.env == 'development':
             self.settings['db_path'] = 'dev_cryptosafe.db'
         else:
@@ -20,7 +19,6 @@ class ConfigManager:
         self.settings['auto_lock_timeout'] = 300
 
     def set_db(self, database: "DatabaseHelper"):
-        """Привязка БД для сохранения настроек (CFG-2)."""
         self.db = database
 
     def get(self, key, default=None):
@@ -33,7 +31,7 @@ class ConfigManager:
             try:
                 rows = self.db.fetch_all("SELECT setting_value FROM settings WHERE setting_key=?", (key,))
                 if rows:
-                    return rows[0]['setting_value']
+                    return rows[0][0]
             except Exception:
                 print(f"[CONFIG] Ошибка чтения ключа {key}")
         
