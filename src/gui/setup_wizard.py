@@ -1,77 +1,79 @@
 import tkinter as tk
-from tkinter import messagebox, filedialog
-from .widgets.password_entry import PasswordEntry
+from tkinter import ttk
 
 
-class SetupWizard(tk.Toplevel):
-    """Мастер первоначальной настройки"""
+class SettingsDialog(tk.Toplevel):
+    """Диалог настроек"""
 
-    def __init__(self, parent, db, on_finish):
+    def __init__(self, parent, config):
         super().__init__(parent)
-        self.title("Первичная настройка CryptoSafe")
-        self.geometry("450x400")
-        self.db = db
-        self.on_finish = on_finish
+        self.title("Настройки")
+        self.geometry("500x350")
+        self.config = config
 
-        #Запрет закрытия крестиком
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        # Запрещаем взаимодействие с главным окном, пока открыты настройки
+        self.grab_set()
 
-        tk.Label(self, text="Создание нового хранилища", font=("Arial", 14, "bold")).pack(pady=15)
+        self._create_widgets()
+        self._load_settings()
 
-        #Создание мастер-пароля
-        f_pass = tk.LabelFrame(self, text="Безопасность", padx=10, pady=10)
-        f_pass.pack(fill=tk.X, padx=20, pady=5)
+    def _create_widgets(self):
+        # Создаем вкладки
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        tk.Label(f_pass, text="Мастер-пароль:").pack(anchor=tk.W)
-        self.pass_entry = PasswordEntry(f_pass)
-        self.pass_entry.pack(fill=tk.X, pady=2)
+        # --- Вкладка Безопасность ---
+        sec_frame = tk.Frame(notebook)
+        notebook.add(sec_frame, text="Безопасность")
 
-        tk.Label(f_pass, text="Подтверждение:").pack(anchor=tk.W)
-        self.confirm_entry = PasswordEntry(f_pass)
-        self.confirm_entry.pack(fill=tk.X, pady=2)
+        # Поле: Таймаут буфера обмена
+        tk.Label(sec_frame, text="Очистка буфера обмена (сек):").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        self.clipboard_entry = tk.Entry(sec_frame)
+        self.clipboard_entry.pack(fill=tk.X, padx=10, pady=5)
 
-        #Выбор расположения БД
-        f_loc = tk.LabelFrame(self, text="Хранилище данных", padx=10, pady=10)
-        f_loc.pack(fill=tk.X, padx=20, pady=5)
+        # Поле: Авто-блокировка
+        tk.Label(sec_frame, text="Авто-блокировка (минуты):").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        self.lock_entry = tk.Entry(sec_frame)
+        self.lock_entry.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(f_loc, text="Путь к файлу базы данных:").pack(anchor=tk.W)
-        self.path_var = tk.StringVar(value=self.db.db_path)
-        tk.Entry(f_loc, textvariable=self.path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(f_loc, text="Обзор", command=self.browse_db).pack(side=tk.RIGHT, padx=5)
+        # --- Вкладка Внешний вид ---
+        app_frame = tk.Frame(notebook)
+        notebook.add(app_frame, text="Внешний вид")
 
-        #Настройки шифрования (заглушка)
-        f_enc = tk.LabelFrame(self, text="Шифрование", padx=10, pady=10)
-        f_enc.pack(fill=tk.X, padx=20, pady=5)
+        tk.Label(app_frame, text="Тема:").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        self.theme_combo = ttk.Combobox(app_frame, values=["Light", "Dark"], state="readonly")
+        self.theme_combo.pack(fill=tk.X, padx=10, pady=5)
 
+        # --- Кнопки ---
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(fill=tk.X, pady=10, padx=10)
 
-        tk.Button(self, text="Создать хранилище", command=self.finish, width=20).pack(pady=20)
+        tk.Button(btn_frame, text="Сохранить", command=self._save_settings).pack(side=tk.RIGHT, padx=5)
+        tk.Button(btn_frame, text="Отмена", command=self.destroy).pack(side=tk.RIGHT)
 
-    def browse_db(self):
-        path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("Database", "*.db")])
-        if path:
-            self.path_var.set(path)
+    def _load_settings(self):
+        """Загружаем текущие настройки в поля вводода."""
+        # Получаем значения из ConfigManager
+        clip_val = self.config.get('clipboard_timeout', 30)
+        lock_val = self.config.get('auto_lock_timeout', 300)
 
-    def finish(self):
-        p1 = self.pass_entry.get()
-        p2 = self.confirm_entry.get()
+        self.clipboard_entry.insert(0, str(clip_val))
+        # Переводим секунды в минуты для удобства пользователя
+        self.lock_entry.insert(0, str(lock_val // 60))
 
-        if len(p1) < 6:
-            messagebox.showerror("Ошибка", "Пароль должен быть не менее 6 символов")
-            return
-        if p1 != p2:
-            messagebox.showerror("Ошибка", "Пароли не совпадают")
-            return
+    def _save_settings(self):
+        """Сохраняем настройки через ConfigManager."""
         try:
-            self.db.execute("INSERT INTO key_store (key_type, params) VALUES (?, ?)",
-                            ("master", "created_sprint1"))
-            print("[WIZARD] Настройки сохранены в key_store")
-        except Exception as e:
-            print(f"[WIZARD ERROR] {e}")
+            # Валидация данных
+            clip_val = int(self.clipboard_entry.get())
+            lock_min = int(self.lock_entry.get())
 
-        self.on_finish(p1, self.path_var.get())
-        self.destroy()
+            # Сохраняем в конфиг (это автоматически запишет в БД благодаря нашему ConfigManager)
+            self.config.set('clipboard_timeout', clip_val)
+            self.config.set('auto_lock_timeout', lock_min * 60)
 
-    def cancel(self):
-        # Если пользователь закрыл окно
-        self.on_finish(None, None)
-        self.destroy()
+            tk.messagebox.showinfo("Успех", "Настройки сохранены", parent=self)
+            self.destroy()
+
+        except ValueError:
+            tk.messagebox.showerror("Ошибка", "Пожалуйста, введите корректные числа", parent=self)
