@@ -1,6 +1,8 @@
 from typing import Optional, TYPE_CHECKING
+
 if TYPE_CHECKING:
     from src.database.db import DatabaseHelper
+
 
 class ConfigManager:
     def __init__(self, env='development'):
