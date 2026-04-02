@@ -14,7 +14,6 @@ class EventSystem:
         callbacks = self._listeners.get(event_name, [])
         for callback in callbacks:
             try:
-                #поддержка синхронной и асинхронной обработки
                 if asyncio.iscoroutinefunction(callback):
                     asyncio.run(callback(data))
                 else:
