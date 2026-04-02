@@ -1,51 +1,39 @@
-import hashlib
-import secrets
-import ctypes
-from typing import Optional
+from typing import Optional, Dict
+from src.core.crypto.key_derivation import KeyDerivation
+from src.core.crypto.key_storage import KeyStorage
+from src.core.crypto.authentication import AuthenticationService
 
 
 class KeyManager:
-    _key_storage = {}
+    def __init__(self, config=None):
+        self.storage = KeyStorage()
+        self.derivation = KeyDerivation(config)
+        self.auth = AuthenticationService(self.storage, self.derivation)
 
-    def derive_key(self, password: str, salt: bytes) -> bytes:
-        if not password or not salt:
-            raise ValueError("Пароль и соль не могут быть пустыми")
+    def setup_new_user(self, password: str) -> dict:
+        auth_hash = self.derivation.hash_password(password)
+        enc_salt = self.derivation.generate_salt()
+        audit_salt = self.derivation.generate_salt()
+        export_salt = self.derivation.generate_salt()
 
-        # заглушка
-        return hashlib.sha256(salt + password.encode('utf-8')).digest()
+        enc_key = self.derivation.derive_encryption_key(password, enc_salt)
+        self.storage.store_key(enc_key)
 
-    def generate_salt(self) -> bytes:
-        """Генерация случайной соли."""
-        return secrets.token_bytes(16)
+        return {
+            "auth_hash": auth_hash,
+            "enc_salt": enc_salt,
+            "audit_salt": audit_salt,
+            "export_salt": export_salt
+        }
 
-    def store_key(self, key: bytes, key_id: str = "master") -> bool:
-        if not isinstance(key, bytes):
-            raise TypeError("Ключ должен быть байтами")
+    def authenticate(self, password: str, auth_hash: str, enc_salt: bytes, mfa_code: str = None) -> bool:
+        return self.auth.login(password, auth_hash, enc_salt, mfa_code)
 
-        self._key_storage[key_id] = key
-        print(f"[KEY_MGR] Ключ '{key_id}' сохранен в ОЗУ (заглушка)")
-        return True
+    def get_session_key(self) -> Optional[bytes]:
+        return self.storage.get_key()
 
-    def load_key(self, key_id: str = "master") -> Optional[bytes]:
-        key = self._key_storage.get(key_id)
-        if key:
-            print(f"[KEY_MGR] Ключ '{key_id}' загружен из ОЗУ (заглушка)")
-        else:
-            print(f"[KEY_MGR] Ключ '{key_id}' не найден")
-        return key
+    def clear_session_key(self):
+        self.storage.clear_key()
 
-    @staticmethod
-    def secure_clear(data):
-        if data is None:
-            return
-
-        if isinstance(data, (bytes, bytearray)):
-            # Создаем буфер для записи нулей
-            buffer = (ctypes.c_char * len(data)).from_address(id(data))
-            ctypes.memset(buffer, 0, len(data))
-            print("[KEY_MGR] Память очищена (secure_clear)")
-        elif isinstance(data, str):
-            try:
-                ctypes.memset(id(data) + 32, 0, len(data) * 2)
-            except Exception:
-                pass  
+    def get_remaining_lock_time(self) -> float:
+        return self.auth.get_remaining_lock_time()
