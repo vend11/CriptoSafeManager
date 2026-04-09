@@ -1,5 +1,4 @@
 import tkinter as tk
-from tkinter import messagebox
 from .widgets.password_entry import PasswordEntry
 import math
 
@@ -8,9 +7,10 @@ class LoginDialog(tk.Toplevel):
     def __init__(self, parent, db, key_manager, on_success):
         super().__init__(parent)
         self.title("Вход")
-        self.geometry("400x250")
-        self.db, self.km, self.on_success = db, key_manager, on_success
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.geometry("400x280")
+        self.db = db
+        self.km = key_manager
+        self.on_success = on_success
 
         self._lock_job = None
 
@@ -27,24 +27,28 @@ class LoginDialog(tk.Toplevel):
         self.status.pack()
 
     def try_login(self, ev=None):
-        if str(self.pass_entry.entry.cget('state')) == 'disabled':
-            return
-
         p = self.pass_entry.get()
-        if not p:
-            self.status.config(text="Введите пароль", fg="orange")
-            return
-
         data = self.db.get_auth_data()
-        if self.km.authenticate(p, data['auth_hash'], data['enc_salt']):
+
+        if self.km.authenticate(p, data.get('auth_hash'), data.get('enc_salt')):
+            # Успешный вход
             self.on_success(True)
-            self.destroy()
         else:
+            # Неудачная попытка — увеличиваем счётчик
+            if hasattr(self.km, 'state_manager') and self.km.state_manager is not None:
+                failed = self.km.state_manager.increment_failed_attempts()
+            else:
+                failed = self.km.get_failed_attempts()
+
             remaining = self.km.get_remaining_lock_time()
+
             if remaining > 0:
                 self._start_lockout(remaining)
             else:
-                self.status.config(text="Неверный пароль", fg="red")
+                self.status.config(
+                    text=f"Неверный пароль (попыток: {failed})",
+                    fg="red"
+                )
 
     def _start_lockout(self, seconds):
         self.pass_entry.entry.config(state=tk.DISABLED)
@@ -61,9 +65,3 @@ class LoginDialog(tk.Toplevel):
             self.status.config(text="Попробуйте снова", fg="orange")
             self.pass_entry.entry.focus_set()
             self._lock_job = None
-
-    def _on_close(self):
-        if self._lock_job is not None:
-            self.after_cancel(self._lock_job)
-        self.on_success(False)
-        self.destroy()
