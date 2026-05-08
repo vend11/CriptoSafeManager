@@ -1,36 +1,31 @@
-import os
-import secrets
-from typing import Tuple
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+import os
+import secrets
+import logging
+
+logger = logging.getLogger("KeyDerivation")
 
 
-class KeyDerivation:
+class KeyDerivationService:
+    # Лимиты для защиты от DoS
     MAX_TIME_COST = 10
-    MAX_MEMORY_COST = 262144
-    MAX_PARALLELISM = 16
+    MAX_MEMORY_COST = 262144  # 256 MB
+    MAX_PARALLELISM = 8
+    MAX_PBKDF2_ITERATIONS = 500000
 
-    def __init__(self, config=None):
-        time_cost = 3
-        memory_cost = 65536
-        parallelism = 4
+    def __init__(self, config: dict = None):
+        cfg = config or {}
 
-        if config:
-            try:
-                time_cost = int(config.get('argon2_time', 3))
-                memory_cost = int(config.get('argon2_memory', 65536))
-                parallelism = int(config.get('argon2_parallelism', 4))
-            except ValueError:
-                pass
+        # Чтение конфига с валидацией
+        time_cost = self._validate_param(cfg.get('argon2_time', 3), 1, self.MAX_TIME_COST, "time_cost")
+        memory_cost = self._validate_param(cfg.get('argon2_memory', 65536), 1024, self.MAX_MEMORY_COST, "memory_cost")
+        parallelism = self._validate_param(cfg.get('argon2_parallelism', 4), 1, self.MAX_PARALLELISM, "parallelism")
 
-        time_cost = min(max(time_cost, 1), self.MAX_TIME_COST)
-        memory_cost = min(max(memory_cost, 1024), self.MAX_MEMORY_COST)
-        parallelism = min(max(parallelism, 1), self.MAX_PARALLELISM)
-
-        self.ph = PasswordHasher(
+        self.argon2_hasher = PasswordHasher(
             time_cost=time_cost,
             memory_cost=memory_cost,
             parallelism=parallelism,
@@ -38,24 +33,38 @@ class KeyDerivation:
             salt_len=16,
             type=Type.ID
         )
-        self.pbkdf2_iterations = 100000
+        self.pbkdf2_iterations = self._validate_param(cfg.get('pbkdf2_iterations', 100000), 10000,
+                                                      self.MAX_PBKDF2_ITERATIONS, "pbkdf2_iterations")
 
-    def hash_password(self, password: str) -> str:
-        return self.ph.hash(password)
+    def _validate_param(self, value, min_val, max_val, name):
+        if not isinstance(value, int):
+            logger.warning(f"Invalid type for {name}, using default.")
+        if value < min_val:
+            logger.warning(f"{name} too low ({value}), clamping to {min_val}")
+            return min_val
+        if value > max_val:
+            logger.warning(f"{name} too high ({value}), clamping to {max_val}")
+            return max_val
+        return value
+
+    def generate_salt(self) -> bytes:
+        return os.urandom(16)
+
+    def create_auth_hash(self, password: str) -> str:
+        return self.argon2_hasher.hash(password)
 
     def verify_password(self, password: str, stored_hash: str) -> bool:
         try:
-            return self.ph.verify(stored_hash, password)
+            self.argon2_hasher.verify(stored_hash, password)
+            return True
         except VerifyMismatchError:
             secrets.compare_digest(b'dummy', b'dummy')
             return False
-        except Exception:
+        except Exception as e:
+            logger.error(f"Verification error: {e}")
             return False
 
-    def generate_salt(self, length: int = 16) -> bytes:
-        return os.urandom(length)
-
-    def derive_encryption_key(self, password: str, salt: bytes) -> bytearray:
+    def derive_encryption_key(self, password: str, salt: bytes) -> bytes:
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -63,9 +72,4 @@ class KeyDerivation:
             iterations=self.pbkdf2_iterations,
             backend=default_backend()
         )
-        return bytearray(kdf.derive(password.encode('utf-8')))
-
-    def derive_audit_key(self, password: str, salt: bytes) -> bytearray:
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=self.pbkdf2_iterations,
-                         backend=default_backend())
-        return bytearray(kdf.derive((password + "_audit").encode('utf-8')))
+        return kdf.derive(password.encode('utf-8'))
