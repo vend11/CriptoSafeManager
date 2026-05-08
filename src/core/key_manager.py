@@ -1,39 +1,250 @@
-from typing import Optional, Dict
-from src.core.crypto.key_derivation import KeyDerivation
-from src.core.crypto.key_storage import KeyStorage
-from src.core.crypto.authentication import AuthenticationService
+import logging
+import threading
+import time
+from typing import TYPE_CHECKING, Optional, Callable
+from .crypto.key_derivation import KeyDerivationService
+from .crypto.key_storage import SecureMemoryCache
+from .crypto.authentication import AuthenticationService, DEFAULT_AUTO_LOCK_TIMEOUT
+from .events import event_bus
+
+if TYPE_CHECKING:
+    from src.database.db import DatabaseHelper
+    from src.core.vault_manager import VaultManager
+
+logger = logging.getLogger("KeyManager")
 
 
 class KeyManager:
-    def __init__(self, config=None):
-        self.storage = KeyStorage()
-        self.derivation = KeyDerivation(config)
-        self.auth = AuthenticationService(self.storage, self.derivation)
+    def __init__(self, db_helper: 'DatabaseHelper', config: dict = None):
+        self.db = db_helper
+        self.config = config or {}
+        self.derivation = KeyDerivationService(self.config)
+        self.storage = SecureMemoryCache()
+        self.auth = AuthenticationService()
 
-    def setup_new_user(self, password: str) -> dict:
-        auth_hash = self.derivation.hash_password(password)
-        enc_salt = self.derivation.generate_salt()
-        audit_salt = self.derivation.generate_salt()
-        export_salt = self.derivation.generate_salt()
+        # Auto-lock timer
+        self._auto_lock_timer: Optional[threading.Timer] = None
+        self._auto_lock_callback: Optional[Callable] = None
+        self._lock = threading.Lock()
 
-        enc_key = self.derivation.derive_encryption_key(password, enc_salt)
-        self.storage.store_key(enc_key)
+        # Настройка из конфига
+        auto_lock_timeout = self.config.get('auto_lock_timeout', DEFAULT_AUTO_LOCK_TIMEOUT)
+        self.auth.set_auto_lock_timeout(auto_lock_timeout)
+        self.auth.set_auto_lock_on_minimize(self.config.get('auto_lock_on_minimize', True))
 
-        return {
-            "auth_hash": auth_hash,
-            "enc_salt": enc_salt,
-            "audit_salt": audit_salt,
-            "export_salt": export_salt
-        }
+    def set_auto_lock_callback(self, callback: Callable):
+        """Установка callback-функции для авто-блокировки"""
+        self._auto_lock_callback = callback
 
-    def authenticate(self, password: str, auth_hash: str, enc_salt: bytes, mfa_code: str = None) -> bool:
-        return self.auth.login(password, auth_hash, enc_salt, mfa_code)
+    def _start_auto_lock_timer(self):
+        """Запуск таймера авто-блокировки"""
+        self._cancel_auto_lock_timer()
 
-    def get_session_key(self) -> Optional[bytes]:
-        return self.storage.get_key()
+        timeout = self.auth.session.auto_lock_timeout
+        if timeout > 0:
+            self._auto_lock_timer = threading.Timer(timeout, self._auto_lock_trigger)
+            self._auto_lock_timer.daemon = True
+            self._auto_lock_timer.start()
+            logger.debug(f"Auto-lock timer started for {timeout}s")
 
-    def clear_session_key(self):
+    def _cancel_auto_lock_timer(self):
+        """Отмена таймера авто-блокировки."""
+        if self._auto_lock_timer is not None:
+            self._auto_lock_timer.cancel()
+            self._auto_lock_timer = None
+
+    def _auto_lock_trigger(self):
+        """Срабатывание авто-блокировки."""
+        with self._lock:
+            if self.auth.is_session_active() and self.auth.is_idle_expired():
+                logger.info("Auto-lock triggered due to inactivity")
+                self.lock()
+                if self._auto_lock_callback:
+                    try:
+                        self._auto_lock_callback()
+                    except Exception as e:
+                        logger.error(f"Auto-lock callback error: {e}")
+
+    def _check_and_lock_if_needed(self):
+        """Проверка необходимости блокировки при активности."""
+        with self._lock:
+            if self.auth.is_session_active():
+                self.auth.update_activity()
+                self._start_auto_lock_timer()
+
+    def setup_new_vault(self, password: str) -> bool:
+        try:
+            auth_hash = self.derivation.create_auth_hash(password)
+            enc_salt = self.derivation.generate_salt()
+
+            self.db.execute("DELETE FROM key_store")
+            self.db.execute(
+                "INSERT INTO key_store (key_type, key_data) VALUES (?, ?)",
+                ("auth_hash", auth_hash.encode('utf-8'))
+            )
+            self.db.execute(
+                "INSERT INTO key_store (key_type, key_data) VALUES (?, ?)",
+                ("enc_salt", enc_salt)
+            )
+
+            enc_key = self.derivation.derive_encryption_key(password, enc_salt)
+            self.storage.store_key(enc_key)
+            logger.info("Vault setup complete.")
+            return True
+        except Exception as e:
+            logger.error(f"Setup failed: {e}")
+            return False
+
+    def unlock(self, password: str) -> bool:
+        """Разблокировка хранилища с запуском сессии"""
+        if self.auth.is_locked_out():
+            raise PermissionError(f"Blocked. Wait {self.auth.get_remaining_lockout_time()}s.")
+
+        row_hash = self.db.fetchone("SELECT key_data FROM key_store WHERE key_type = 'auth_hash'")
+        row_salt = self.db.fetchone("SELECT key_data FROM key_store WHERE key_type = 'enc_salt'")
+
+        if not row_hash or not row_salt:
+            logger.error("Keys not found in DB.")
+            return False
+
+        stored_hash = row_hash[0].decode('utf-8')
+        enc_salt = row_salt[0]
+
+        if self.derivation.verify_password(password, stored_hash):
+            enc_key = self.derivation.derive_encryption_key(password, enc_salt)
+            self.storage.store_key(enc_key)
+
+            # Запуск сессии
+            self.auth.start_session()
+            self._start_auto_lock_timer()
+
+            # Публикация события
+            event_bus.publish("UserLoggedIn", data={"timestamp": time.time()})
+
+            logger.info("Vault unlocked.")
+            return True
+        else:
+            self.auth.register_failed_attempt()
+            return False
+
+    def lock(self):
+        """Блокировка хранилища с завершением сессии"""
+        self._cancel_auto_lock_timer()
+        self.auth.end_session()
         self.storage.clear_key()
+        event_bus.publish("UserLoggedOut")
+        logger.info("Vault locked.")
 
-    def get_remaining_lock_time(self) -> float:
-        return self.auth.get_remaining_lock_time()
+    def touch(self):
+        """Обновление активности пользователя"""
+        self._check_and_lock_if_needed()
+
+    def on_minimize(self):
+        """Обработчик сворачивания приложения"""
+        if self.auth.session.auto_lock_on_minimize and self.auth.is_session_active():
+            logger.info("Auto-lock on minimize triggered")
+            self.lock()
+
+    # СМЕНА ПАРОЛЯ
+
+    def change_password(self, old_password: str, new_password: str, entry_manager: 'EntryManager',
+                        crypto_service) -> bool:
+        # 1. Валидация нового пароля ПЕРЕД любыми операциями
+        valid, msg = self.auth.validate_password_strength(new_password)
+        if not valid:
+            raise ValueError(msg)
+
+        # 2. Проверка старого пароля
+        if not self.unlock(old_password):
+            raise ValueError("Неверный текущий пароль.")
+
+        # Сохраняем старые ключи для отката
+        old_auth_hash = self.db.fetchone("SELECT key_data FROM key_store WHERE key_type = 'auth_hash'")[0]
+        old_enc_salt = self.db.fetchone("SELECT key_data FROM key_store WHERE key_type = 'enc_salt'")[0]
+        old_key_bytes = self.storage.get_key()
+
+        try:
+            # 3. Получаем все данные (используем entry_manager)
+            raw_entries = self.db.fetchall("SELECT id, encrypted_data FROM vault_entries")
+
+            # 4. Генерируем новые ключи
+            new_auth_hash = self.derivation.create_auth_hash(new_password)
+            new_enc_salt = self.derivation.generate_salt()
+            new_enc_key = self.derivation.derive_encryption_key(new_password, new_enc_salt)
+
+            # 5. Перешифровка (данные уже в формате AES-256-GCM, просто копируем)
+            #encrypted_data — это полный AES-256-GCM blob
+            # При смене пароля нужно расшифровать и зашифровать заново
+            re_encrypted_data = []
+
+            from core.vault.encryption_service import AES256GCMService
+
+            # Текущий сервис для расшифровки
+            decrypt_service = AES256GCMService()
+            decrypt_service.set_key_manager(self)  # self — KeyManager
+
+            # Новый сервис для шифрования
+            temp_storage = SecureMemoryCache()
+            temp_storage.store_key(new_enc_key)
+
+            encrypt_service = AES256GCMService()
+            fake_km = type('FakeKM', (), {'storage': temp_storage})()
+            encrypt_service.set_key_manager(fake_km)
+
+            for entry_id, encrypted_data in raw_entries:
+                try:
+                    # Расшифровываем старым ключом
+                    plaintext = decrypt_service.decrypt(encrypted_data)
+                    # Шифруем новым ключом
+                    new_encrypted = encrypt_service.encrypt(plaintext)
+                    re_encrypted_data.append((entry_id, new_encrypted))
+
+                    # Немедленная очистка
+                    del plaintext
+                except Exception as decrypt_error:
+                    logger.error(f"Failed to re-encrypt entry {entry_id}: {decrypt_error}")
+                    # Пропускаем проблемную запись (можно изменить стратегию)
+                    continue
+
+            # 6. Атомарное обновление БД
+            queries = []
+
+            # Обновляем данные записей
+            for eid, new_enc_data in re_encrypted_data:
+                queries.append((
+                    "UPDATE vault_entries SET encrypted_data = ? WHERE id = ?",
+                    (new_enc_data, eid)
+                ))
+
+            # Обновляем ключи
+            queries.append((
+                "UPDATE key_store SET key_data = ? WHERE key_type = 'auth_hash'",
+                (new_auth_hash.encode('utf-8'),)
+            ))
+            queries.append((
+                "UPDATE key_store SET key_data = ? WHERE key_type = 'enc_salt'",
+                (new_enc_salt,)
+            ))
+
+            # Выполняем все запросы в транзакции
+            self.db.begin_transaction()
+            try:
+                for query, params in queries:
+                    self.db.execute(query, params)
+                self.db.commit_transaction()
+            except Exception as db_error:
+                self.db.rollback_transaction()
+                raise RuntimeError(f"DB transaction failed: {db_error}")
+
+            # 7. Обновляем ключ в оперативной памяти
+            self.storage.store_key(new_enc_key)
+
+            logger.info("Password changed successfully.")
+            return True
+
+        except Exception as e:
+            logger.error(f"Password change failed: {e}")
+            # Откат: восстанавливаем старые ключи в памяти
+            if old_key_bytes:
+                self.storage.store_key(old_key_bytes)
+            raise RuntimeError(f"Ошибка при смене пароля: {e}")
