@@ -1,47 +1,82 @@
-from typing import Optional, TYPE_CHECKING
+import os
+import json
+from typing import Optional, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.database.db import DatabaseHelper
 
 
 class ConfigManager:
-    def __init__(self, env='development'):
-        self.env = env
-        self.db: Optional["DatabaseHelper"] = None
-        self.settings = {}
 
-        if self.env == 'development':
-            self.settings['db_path'] = 'dev_cryptosafe.db'
+    def __init__(self, profile: str = "default"):
+        self.profile = profile
+        self.config_dir = os.path.join(os.path.expanduser("~"), ".cryptosafe")
+        self.config_file = os.path.join(self.config_dir, f"config_{profile}.json")
+        self._ensure_config_dir()
+
+        # Инициализируем настройки значениями по умолчанию
+        self.settings = self._default_settings()
+        self._load_meta_config()
+
+        self._db_helper: Optional['DatabaseHelper'] = None
+
+    def _ensure_config_dir(self):
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+
+    def _default_settings(self) -> dict:
+        return {
+            "clipboard_timeout": 30,
+            "auto_lock_timeout": 5,
+            "theme": "light"
+        }
+
+    def _load_meta_config(self):
+        """Загрузка метаданных из JSON файла."""
+        if os.path.exists(self.config_file):
+            with open(self.config_file, 'r') as f:
+                data = json.load(f)
+                # Путь к БД храним в атрибуте, а не в общем словаре настроек
+                self.db_path = data.get("db_path", os.path.join(self.config_dir, "vault.db"))
         else:
-            self.settings['db_path'] = 'cryptosafe.db'
+            # Если файла нет, используем путь по умолчанию
+            self.db_path = os.path.join(self.config_dir, "vault.db")
+            self._save_meta_config()
 
-    def set_db(self, database: "DatabaseHelper"):
-        self.db = database
+    def _save_meta_config(self):
+        """Сохранение метаданных в JSON."""
+        with open(self.config_file, 'w') as f:
+            json.dump({"db_path": self.db_path}, f, indent=4)
 
-    def get(self, key, default=None):
-        if key in self.settings:
-            return self.settings[key]
+    def attach_database(self, db_helper: 'DatabaseHelper'):
+        """Подключение к БД для синхронизации настроек."""
+        self._db_helper = db_helper
+        self._load_settings_from_db()
 
-        if self.db:
-            try:
-                rows = self.db.query("SELECT setting_value FROM settings WHERE setting_key=?", (key,))
-                if rows:
-                    val = rows[0][0]
-                    return int(val) if val.isdigit() else val
-            except Exception as e:
-                print(f"[CONFIG] Ошибка чтения ключа {key}: {e}")
+    def _load_settings_from_db(self):
+        """Загрузка настроек из таблицы settings"""
+        if not self._db_helper:
+            return
 
-        return default
+        rows = self._db_helper.fetchall("SELECT setting_key, setting_value FROM settings")
+        for row in rows:
+            key, value = row
+            self.settings[key] = value
 
-    def set(self, key, value, encrypted=False):
+    def get(self, key: str, default=None):
+        # Сначала ищем в runtime настройках, потом в БД
+        return self.settings.get(key, default)
+
+    def set(self, key: str, value: Any):
         self.settings[key] = value
-
-        if self.db:
-            try:
-                self.db.execute(
-                    "INSERT OR REPLACE INTO settings (setting_key, setting_value, encrypted) VALUES (?, ?, ?)",
-                    (key, str(value), 1 if encrypted else 0),
-                    commit=True
-                )
-            except Exception as e:
-                print(f"[CONFIG] Ошибка записи ключа {key}: {e}")
+        # Сохраняем в БД, если подключена
+        if self._db_helper:
+            # Простая реализация upsert
+            exists = self._db_helper.fetchone("SELECT 1 FROM settings WHERE setting_key = ?", (key,))
+            if exists:
+                self._db_helper.execute("UPDATE settings SET setting_value = ? WHERE setting_key = ?",
+                                        (str(value), key))
+            else:
+                self._db_helper.execute("INSERT INTO settings (setting_key, setting_value) VALUES (?, ?)",
+                                        (key, str(value)))
