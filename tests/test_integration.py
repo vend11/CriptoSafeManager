@@ -1,62 +1,109 @@
-import time
-from unittest.mock import patch
-from src.core.config import ConfigManager
-from src.core.events import EventSystem, Events
-from src.core.key_manager import KeyManager
+import pytest
+import os
+import sys
+import shutil
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from core.config import ConfigManager
+from database.db import DatabaseHelper
+from core.vault_manager import VaultManager
+from core.crypto.placeholder import AES256Placeholder
+from core.key_manager import KeyManager
 
 
-def test_event_system_integration():
-    events = EventSystem()
-    received = []
+@pytest.fixture
+def clean_env(tmp_path):
+    """Создает чистое окружение для теста интеграции."""
+    # 1. Путь к временной папке
+    test_dir = tmp_path / "crypto_safe_test"
+    test_dir.mkdir()
 
-    def callback(data): received.append(data)
+    # 2. Путь к БД
+    db_path = test_dir / "vault.db"
 
-    events.subscribe(Events.ENTRY_ADDED, callback)
-    events.publish(Events.ENTRY_ADDED, "test_data")
+    yield db_path
 
-    assert len(received) == 1
-    assert received[0] == "test_data"
-
-
-def test_config_db_integration(temp_db):
-    config = ConfigManager()
-    config.set_db(temp_db)
-    config.set("test_key", "test_value")
-    config.settings.pop("test_key", None)
-    val = config.get("test_key")
-    assert val == "test_value"
+    # Очистка - закрываем БД перед удалением
+    import gc
+    gc.collect()  # Принудительная сборка мусора для освобождения файлов
+    if os.path.exists(db_path):
+        try:
+            os.remove(db_path)
+        except PermissionError:
+            pass  # Файл может быть заблокирован, игнорируем
 
 
-def test_full_application_lifecycle(temp_db):
-    assert temp_db.is_initialized() is False
+def test_full_setup_and_encryption_flow(clean_env):
+    """
+    TEST-2: Интеграционный тест полного цикла.
+    Сценарий: Настройка БД -> Генерация ключа -> Добавление записи -> Проверка шифрования (DB-2).
+    """
+    db_path = str(clean_env)
 
-    key_manager = KeyManager()
-    password = "SuperStrongPassword123!"
+    # 1. Инициализация БД (имитация Setup Wizard)
+    db = DatabaseHelper(db_path)
+    assert os.path.exists(db_path), "База данных не создана"
 
-    keys = key_manager.setup_new_user(password)
-    temp_db.save_auth_data(keys['auth_hash'], keys['enc_salt'])
+    # 2. Генерация ключа (имитация создания мастер-пароля)
+    # KeyManager теперь требует db_helper в конструкторе
+    km = KeyManager(db)
+    salt = km.derivation.generate_salt()
+    master_key = km.derivation.derive_encryption_key("super_secret_password", salt)
 
-    assert temp_db.is_initialized() is True
+    # Сохраняем соль и хеш в БД
+    auth_hash = km.derivation.create_auth_hash("super_secret_password")
+    db.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)", ("auth_hash", auth_hash.encode('utf-8')))
+    db.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)", ("enc_salt", salt))
 
-    temp_db._temp_key = key_manager.get_session_key()
-    temp_db.add_vault_entry("InitialSite", "user1", "initial_pass")
+    # 3. Инициализация менеджера хранилища
+    crypto = AES256Placeholder()
+    crypto.set_key_manager(km)
 
-    key_manager.clear_session_key()
-    assert key_manager.get_session_key() is None
+    # Устанавливаем ключ в storage для шифрования
+    km.storage.store_key(master_key)
 
-    auth_data = temp_db.get_auth_data()
+    vault = VaultManager(db, crypto)
 
-    assert key_manager.authenticate("WrongPass", auth_data['auth_hash'], auth_data['enc_salt']) is False
+    # 4. Добавление записи (Action)
+    plain_password = "My_Secret_Pass_123"
+    vault.add_entry("Google", "user@gmail.com", plain_password, "google.com")
 
-    with patch('time.time', return_value=time.time() + 2):
-        assert key_manager.authenticate(password, auth_data['auth_hash'], auth_data['enc_salt']) is True
+    # 5. ПРОВЕРКА DB-2: Данные в БД должны быть зашифрованы
+    # Делаем прямой запрос в БД, минуя VaultManager
+    row = db.fetchone("SELECT encrypted_password FROM vault_entries WHERE title = 'Google'")
 
-    assert key_manager.get_session_key() is not None
+    assert row is not None, "Запись не найдена"
+    stored_blob = row[0]
 
-    temp_db._temp_key = key_manager.get_session_key()
+    # Проверка 1: Это байты (а не строка)
+    assert isinstance(stored_blob, bytes)
 
-    rows = temp_db.query("SELECT id FROM vault_entries")
-    assert len(rows) == 1
+    # Проверка 2: Это НЕ открытый текст (самое важное для DB-2)
+    assert stored_blob != plain_password.encode(), "Пароль хранится в открытом виде!"
 
-    dec_pass = temp_db.get_decrypted_password(rows[0]['id'])
-    assert dec_pass == "initial_pass"
+    # Проверка 3: Расшифровка работает корректно
+    # Ключ уже установлен в storage, просто расшифровываем
+    decrypted = crypto.decrypt(stored_blob).decode()
+    assert decrypted == plain_password, "Ошибка расшифровки"
+
+    db.close()
+
+
+def test_config_loading(tmp_path):
+    """
+    TEST-2: Тест загрузки конфигурации.
+    """
+    # Создаем временный конфиг
+    config_dir = tmp_path / ".cryptosafe"
+    config_dir.mkdir()
+    config_file = config_dir / "config_default.json"
+
+    # Пишем тестовые данные
+    import json
+    with open(config_file, 'w') as f:
+        json.dump({"db_path": str(tmp_path / "test.db")}, f)
+
+    # Подменяем путь домашней директории
+    from unittest.mock import patch
+    with patch('os.path.expanduser', return_value=str(tmp_path)):
+        cfg = ConfigManager()
+        assert cfg.db_path == str(tmp_path / "test.db")
