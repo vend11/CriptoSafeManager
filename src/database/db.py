@@ -1,185 +1,242 @@
+import logging
+import os
+import shutil
 import sqlite3
-import secrets
-import base64
-import time
-from pathlib import Path
-from queue import Queue, Empty
-from contextlib import contextmanager
-from typing import Callable, List, Optional
-from .models import SCHEMA_V1, SCHEMA_V3_UPDATE
-from src.core.crypto.placeholder import AES256Placeholder
-
+import threading
+logger = logging.getLogger("Database")
+DB_SCHEMA_VERSION = 3
 
 class DatabaseHelper:
-    def __init__(self, db_path: str, size: int = 4):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.size = max(1, size)
-        self._pool: "Queue[sqlite3.Connection]" = Queue(maxsize=self.size)
-        self._fill_pool()
-        self.crypto = AES256Placeholder()
-        self._temp_key = secrets.token_bytes(16)
-        self._migrations = [self._migration_1_initial_schema, self._migration_2_ensure_settings,
-                            self._migration_3_update_key_store]
-        self.migrate()
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._local = threading.local()
+        self._initialize_db()
 
-    def _new_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_connection(self) -> sqlite3.Connection:
+        if not hasattr(self._local, "connection"):
+            self._local.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._local.connection.execute("PRAGMA foreign_keys = ON")
+            self._local.connection.execute("PRAGMA journal_mode = WAL")
+            self._local.connection.execute("PRAGMA synchronous = NORMAL")
+            self._local.connection.execute("PRAGMA temp_store = MEMORY")
+            self._local.connection.execute("PRAGMA cache_size = -20000")
+            self._local.explicit_transaction = False
+        return self._local.connection
 
-    def _fill_pool(self) -> None:
-        for _ in range(self.size): self._pool.put(self._new_connection())
+    def _initialize_db(self):
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
-    @contextmanager
-    def connection(self):
-        try:
-            conn = self._pool.get_nowait()
-            temporary = False
-        except Empty:
-            conn = self._new_connection()
-            temporary = True
-        try:
-            yield conn
-        finally:
-            if temporary:
-                conn.close()
-            else:
-                self._pool.put_nowait(conn)
+        cursor.execute("PRAGMA user_version")
+        version = cursor.fetchone()[0]
 
-    def execute(self, sql, params=(), commit=False):
-        with self.connection() as conn:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            if commit: conn.commit()
-            return cur
+        self._create_supporting_tables(cursor)
+        self._migrate_key_store(cursor)
 
-    def query(self, sql, params=()):
-        return self.execute(sql, params).fetchall()
+        if self._table_exists(cursor, "vault_entries"):
+            if self._vault_entries_needs_migration(cursor):
+                self._migrate_vault_entries(cursor)
+        else:
+            self._create_vault_entries_table(cursor)
 
-    def fetch_all(self, sql, params=()):
-        return self.query(sql, params)
+        self._create_indexes(cursor)
 
-    def get_user_version(self):
-        with self.connection() as conn:
-            r = conn.execute('PRAGMA user_version').fetchone()
-            return int(r[0]) if r else 0
+        if version < DB_SCHEMA_VERSION:
+            cursor.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
 
-    def _set_user_version(self, v):
-        with self.connection() as conn:
-            conn.execute(f'PRAGMA user_version = {int(v)}');
-            conn.commit()
-
-    def migrate(self):
-        curr = self.get_user_version()
-        if curr >= len(self._migrations): return
-        for i in range(curr, len(self._migrations)):
-            with self.connection() as conn:
-                self._migrations[i](conn)
-                self._set_user_version(i + 1)
-
-    def _migration_1_initial_schema(self, conn):
-        conn.executescript(SCHEMA_V1);
         conn.commit()
 
-    def _migration_2_ensure_settings(self, conn):
-        cur = conn.cursor()
-        cur.execute("""
+    def _create_supporting_tables(self, cursor):
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                entry_id INTEGER,
+                details TEXT,
+                signature BLOB
+            )
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 setting_key TEXT UNIQUE NOT NULL,
                 setting_value TEXT,
                 encrypted INTEGER DEFAULT 0
-            );
-        """)
-        default_settings = [
-            ('clipboard_timeout', '30'),
-            ('auto_lock_timeout', '300'),
-            ('argon2_time', '3'),
-            ('argon2_memory', '65536'),
-            ('argon2_parallelism', '4')
-        ]
-        cur.executemany(
-            "INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (?, ?)",
-            default_settings
+            )
+            """
         )
-        conn.commit()
 
-    def _migration_3_update_key_store(self, conn):
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='key_store'")
-        if cur.fetchone():
-            cur.executescript(SCHEMA_V3_UPDATE)
-        else:
-            cur.executescript("""
-                CREATE TABLE key_store (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key_type TEXT NOT NULL,
-                    key_data BLOB,
-                    version INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-             """)
-        conn.commit()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS key_store (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_type TEXT UNIQUE NOT NULL,
+                key_data BLOB,
+                version INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
-    def is_initialized(self):
-        return len(self.query("SELECT id FROM key_store WHERE key_type='auth_hash'")) > 0
+    def _create_vault_entries_table(self, cursor):
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_entries (
+                id TEXT PRIMARY KEY,
+                encrypted_data BLOB NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                tags TEXT
+            )
+            """
+        )
 
-    def save_auth_data(self, auth_hash: str, enc_salt: bytes, audit_salt: bytes = None, export_salt: bytes = None):
-        self.execute("DELETE FROM key_store", commit=True)
-        self.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)",
-                     ("auth_hash", auth_hash.encode('utf-8')), commit=True)
-        self.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)", ("enc_salt", enc_salt), commit=True)
-        if audit_salt: self.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)",
-                                    ("audit_salt", audit_salt), commit=True)
-        if export_salt: self.execute("INSERT INTO key_store (key_type, key_data) VALUES (?, ?)",
-                                     ("export_salt", export_salt), commit=True)
+    def _create_indexes(self, cursor):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vault_created_at ON vault_entries(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vault_updated_at ON vault_entries(updated_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vault_tags ON vault_entries(tags)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(setting_key)")
 
-    def get_auth_data(self):
-        rows = self.query("SELECT key_type, key_data FROM key_store")
-        data = {}
-        for r in rows:
-            if r['key_type'] == 'auth_hash':
-                data['auth_hash'] = r['key_data'].decode('utf-8')
-            elif r['key_type'] == 'enc_salt':
-                data['enc_salt'] = r['key_data']
-        return data
+    @staticmethod
+    def _table_exists(cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        return cursor.fetchone()[0] > 0
 
-    def re_encrypt_all_data(self, old_key: bytes, new_key: bytes, progress_cb=None) -> bool:
-        conn = None
+    def _vault_entries_needs_migration(self, cursor) -> bool:
+        cursor.execute("PRAGMA table_info(vault_entries)")
+        columns = {row[1] for row in cursor.fetchall()}
+        clean_columns = {"id", "encrypted_data", "created_at", "updated_at", "tags"}
+        return columns != clean_columns
+
+    def _migrate_vault_entries(self, cursor):
+        logger.info("Migrating vault_entries to clean Sprint 3 schema")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_entries_new (
+                id TEXT PRIMARY KEY,
+                encrypted_data BLOB NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                tags TEXT
+            )
+            """
+        )
+
+        cursor.execute("PRAGMA table_info(vault_entries)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "encrypted_data" in columns:
+            cursor.execute(
+                """
+                INSERT INTO vault_entries_new (id, encrypted_data, created_at, updated_at, tags)
+                SELECT
+                    CAST(id AS TEXT),
+                    encrypted_data,
+                    COALESCE(created_at, CURRENT_TIMESTAMP),
+                    COALESCE(updated_at, CURRENT_TIMESTAMP),
+                    COALESCE(tags, '[]')
+                FROM vault_entries
+                WHERE encrypted_data IS NOT NULL
+                """
+            )
+
+        cursor.execute("DROP TABLE IF EXISTS vault_entries_old")
+        cursor.execute("ALTER TABLE vault_entries RENAME TO vault_entries_old")
+        cursor.execute("ALTER TABLE vault_entries_new RENAME TO vault_entries")
+
+    def _migrate_key_store(self, cursor):
+        """Добавляет недостающие колонки в таблицу key_store"""
+        cursor.execute("PRAGMA table_info(key_store)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        # Список нужных колонок и их типов
+        required_columns = {
+            'key_data': 'BLOB',
+            'version': 'INTEGER DEFAULT 1',
+            'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+        }
+
+        for col_name, col_type in required_columns.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE key_store ADD COLUMN {col_name} {col_type}")
+                    logger.info(f"Added column '{col_name}' to key_store table")
+                except Exception as e:
+                    logger.error(f"Failed to add column '{col_name}': {e}")
+
+    def execute(self, query: str, params: tuple = ()):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        if not getattr(self._local, "explicit_transaction", False):
+            conn.commit()
+        return cursor.lastrowid
+
+    def execute_many(self, queries: list):
+        conn = self._get_connection()
+        cursor = conn.cursor()
         try:
-            conn = self._new_connection()
-            cur = conn.cursor()
-            cur.execute("BEGIN TRANSACTION")
-            cur.execute("SELECT id, encrypted_password FROM vault_entries")
-            rows = cur.fetchall()
-            for i, r in enumerate(rows):
-                old_b = base64.b64decode(r['encrypted_password'])
-                dec = self.crypto.decrypt(old_b, old_key)
-                new_b = self.crypto.encrypt(dec, new_key)
-                cur.execute("UPDATE vault_entries SET encrypted_password = ? WHERE id = ?",
-                            (base64.b64encode(new_b).decode(), r['id']))
-                if progress_cb: progress_cb((i + 1) / len(rows) * 100)
+            for query, params in queries:
+                cursor.execute(query, params if params else ())
             conn.commit()
             return True
         except Exception as e:
-            print(f"Re-encrypt error: {e}")
-            if conn: conn.rollback()
+            conn.rollback()
+            logger.error(f"Transaction failed, rolled back: {e}")
             return False
-        finally:
-            if conn: conn.close()
 
-    def add_vault_entry(self, t, u, p, url=""):
-        enc = base64.b64encode(self.crypto.encrypt(p.encode(), self._temp_key)).decode()
-        self.execute("INSERT INTO vault_entries (title, username, encrypted_password, url) VALUES (?,?,?,?)",
-                     (t, u, enc, url), True)
+    def begin_transaction(self):
+        conn = self._get_connection()
+        self._local.explicit_transaction = True
+        conn.execute("BEGIN IMMEDIATE")
 
-    def delete_entry(self, eid):
-        self.execute("DELETE FROM vault_entries WHERE id=?", (eid,), True)
+    def commit_transaction(self):
+        conn = self._get_connection()
+        conn.commit()
+        self._local.explicit_transaction = False
 
-    def get_decrypted_password(self, eid):
-        r = self.query("SELECT encrypted_password FROM vault_entries WHERE id=?", (eid,))
-        if r: return self.crypto.decrypt(base64.b64decode(r[0]['encrypted_password']), self._temp_key).decode()
+    def rollback_transaction(self):
+        conn = self._get_connection()
+        conn.rollback()
+        self._local.explicit_transaction = False
+        logger.warning("Transaction rolled back")
 
-    def create_backup(self):
-        return "stub.db"
+    def fetchall(self, query: str, params: tuple = ()):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return cursor.fetchall()
+
+    def fetchone(self, query: str, params: tuple = ()):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return cursor.fetchone()
+
+    def backup(self, backup_path: str) -> bool:
+        try:
+            if hasattr(self._local, "connection"):
+                self._local.connection.close()
+                del self._local.connection
+
+            if os.path.exists(self.db_path):
+                shutil.copy2(self.db_path, backup_path)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Backup error: {e}")
+            return False
+
+    def close(self):
+        if hasattr(self._local, "connection"):
+            self._local.connection.close()
+            del self._local.connection
