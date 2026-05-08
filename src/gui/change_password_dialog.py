@@ -1,61 +1,102 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+import logging
 from .widgets.password_entry import PasswordEntry
-from src.core.crypto.password_validator import PasswordValidator
-import threading
+
+# ИНИЦИАЛИЗАЦИЯ ЛОГГЕРА
+logger = logging.getLogger("ChangePasswordDialog")
 
 
 class ChangePasswordDialog(tk.Toplevel):
-    def __init__(self, parent, db, key_manager):
+    def __init__(self, parent, key_manager, entry_manager, crypto_service):
         super().__init__(parent)
-        self.title("Смена пароля")
-        self.geometry("450x400")
-        self.db, self.km = db, key_manager
+        self.title("Смена мастер-пароля")
+        self.geometry("450x300")
+        self.resizable(False, False)
+
+        self.key_manager = key_manager
+        self.entry_manager = entry_manager
+        self.crypto_service = crypto_service
+
+        self.transient(parent)
         self.grab_set()
 
-        tk.Label(self, text="Текущий пароль:").pack(anchor=tk.W, padx=20, pady=(20, 0))
-        self.old = PasswordEntry(self);
-        self.old.pack(padx=20, fill=tk.X)
+        self.create_widgets()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-        tk.Label(self, text="Новый пароль:").pack(anchor=tk.W, padx=20, pady=(10, 0))
-        self.new = PasswordEntry(self);
-        self.new.pack(padx=20, fill=tk.X)
+    def create_widgets(self):
+        frame = ttk.Frame(self, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(self, text="Повторите:").pack(anchor=tk.W, padx=20, pady=(10, 0))
-        self.conf = PasswordEntry(self);
-        self.conf.pack(padx=20, fill=tk.X)
+        # Текущий пароль
+        ttk.Label(frame, text="Текущий пароль:").pack(anchor=tk.W)
+        self.old_pass = PasswordEntry(frame)
+        self.old_pass.pack(fill=tk.X, pady=(0, 10))
 
-        self.btn = tk.Button(self, text="Изменить", command=self.start);
-        self.btn.pack(pady=20)
-        self.pbar = ttk.Progressbar(self, mode='determinate');
-        self.pbar.pack(fill=tk.X, padx=20)
+        # Новый пароль
+        ttk.Label(frame, text="Новый пароль:").pack(anchor=tk.W, pady=(5, 0))
+        self.new_pass = PasswordEntry(frame)
+        self.new_pass.pack(fill=tk.X, pady=(0, 10))
 
-    def start(self):
-        if self.new.get() != self.conf.get(): return messagebox.showerror("Error", "Не совпадают")
-        ok, errs = PasswordValidator.validate(self.new.get())
-        if not ok: return messagebox.showerror("Weak", "\n".join(errs))
+        # Подтверждение
+        ttk.Label(frame, text="Подтвердите новый пароль:").pack(anchor=tk.W)
+        self.confirm_pass = PasswordEntry(frame)
+        self.confirm_pass.pack(fill=tk.X, pady=(0, 10))
 
-        data = self.db.get_auth_data()
-        if not self.km.authenticate(self.old.get(), data['auth_hash'], data['enc_salt']):
-            return messagebox.showerror("Error", "Старый пароль неверен")
+        # Подсказка
+        hint_text = "Минимум 12 символов: заглавные, строчные, цифры, спецсимволы."
+        ttk.Label(frame, text=hint_text, foreground="gray", font=("Arial", 8)).pack(anchor=tk.W, pady=(0, 10))
 
-        self.btn.config(state=tk.DISABLED)
-        threading.Thread(target=self._run, daemon=True).start()
+        # Кнопки
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="Отмена", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Сменить пароль", command=self.on_change).pack(side=tk.RIGHT)
 
-    def _run(self):
+    def on_change(self):
+        old_p = self.old_pass.get()
+        new_p = self.new_pass.get()
+        conf_p = self.confirm_pass.get()
+
+        # 1. Проверка заполнения полей
+        if not old_p or not new_p:
+            messagebox.showerror("Ошибка", "Заполните все поля.", parent=self)
+            return
+
+        if new_p != conf_p:
+            messagebox.showerror("Ошибка", "Новые пароли не совпадают.", parent=self)
+            return
+
+        if old_p == new_p:
+            messagebox.showerror("Ошибка", "Новый пароль должен отличаться от текущего.", parent=self)
+            return
+
+        # 2. Валидация нового пароля (не закрываем окно при ошибке)
+        is_valid, msg = self.key_manager.auth.validate_password_strength(new_p)
+        if not is_valid:
+            messagebox.showerror("Слабый пароль", msg, parent=self)
+            return
+
         try:
-            old_key = self.km.get_session_key()
-            new_keys = self.km.setup_new_user(self.new.get())
-            new_key = self.km.get_session_key()
+            self.config(cursor="watch")
+            self.update()
 
-            ok = self.db.re_encrypt_all_data(old_key, new_key,
-                                             lambda v: self.after(0, lambda: self.pbar.config(value=v)))
-            if ok:
-                self.db.save_auth_data(new_keys['auth_hash'], new_keys['enc_salt'])
-                self.after(0, lambda: messagebox.showinfo("OK", "Пароль изменен"))
-                self.after(0, self.destroy)
-            else:
-                raise Exception("DB Error")
+            self.key_manager.change_password(
+                old_p,
+                new_p,
+                self.entry_manager,
+                self.crypto_service,
+            )
+            messagebox.showinfo("Успех", "Мастер-пароль успешно изменен.", parent=self)
+            self.destroy()
+
+        except ValueError as e:
+            messagebox.showerror("Ошибка", str(e), parent=self)
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
-            self.after(0, lambda: self.btn.config(state=tk.NORMAL))
+            logger.error(f"Change password error: {e}")
+            messagebox.showerror("Критическая ошибка", f"Не удалось сменить пароль:\n{e}", parent=self)
+        finally:
+            try:
+                self.config(cursor="")
+            except tk.TclError:
+                pass
