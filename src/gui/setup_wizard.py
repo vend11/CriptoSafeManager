@@ -1,44 +1,103 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, filedialog, messagebox
 from .widgets.password_entry import PasswordEntry
-from src.core.crypto.password_validator import PasswordValidator
+from core.config import ConfigManager
+from core.crypto.authentication import AuthenticationService
 
 
 class SetupWizard(tk.Toplevel):
-    def __init__(self, parent, db, key_manager, on_finish):
+    """
+    Мастер первоначальной настройки.
+    Требование: GUI-3
+    """
+
+    def __init__(self, parent, config: ConfigManager):
         super().__init__(parent)
-        self.title("Создание хранилища")
-        self.geometry("450x400")
-        self.db = db
-        self.km = key_manager
-        self.on_finish = on_finish
+        self.config = config
+        self.title("Начальная настройка CryptoSafe")
+        self.geometry("400x300")
+        self.resizable(False, False)
 
-        tk.Label(self, text="Создание мастер-пароля", font=("Arial", 12)).pack(pady=20)
-        tk.Label(self, text="Пароль:").pack()
-        self.p1 = PasswordEntry(self)
-        self.p1.pack(pady=5)
+        self.db_path_var = tk.StringVar(value=config.db_path)
 
-        tk.Label(self, text="Повторите:").pack()
-        self.p2 = PasswordEntry(self)
-        self.p2.pack(pady=5)
+        self.db_path = None
+        self.password = None
+        self.completed = False
 
-        tk.Button(self, text="Создать", command=self.finish).pack(pady=20)
+        self.create_widgets()
 
-    def finish(self):
-        if self.p1.get() != self.p2.get():
-            messagebox.showerror("Ошибка", "Пароли не совпадают")
+        self.transient(parent)
+        self.grab_set()
+
+    def create_widgets(self):
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Вкладка 1: База данных
+        tab_db = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_db, text="База данных")
+
+        ttk.Label(tab_db, text="Расположение файла БД:").pack(anchor=tk.W)
+        ttk.Entry(tab_db, textvariable=self.db_path_var).pack(fill=tk.X, pady=5)
+        ttk.Button(tab_db, text="Обзор...", command=self.browse_db).pack(anchor=tk.W)
+
+        # Вкладка 2: Мастер-пароль
+        tab_pass = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_pass, text="Безопасность")
+
+        ttk.Label(tab_pass, text="Создайте мастер-пароль:").pack(anchor=tk.W, pady=(0, 5))
+        self.pass_entry = PasswordEntry(tab_pass)
+        self.pass_entry.pack(fill=tk.X, pady=5)
+
+        ttk.Label(tab_pass, text="Подтвердите пароль:").pack(anchor=tk.W, pady=(10, 5))
+        self.pass_confirm = PasswordEntry(tab_pass)
+        self.pass_confirm.pack(fill=tk.X, pady=5)
+
+        # Подсказка требований (улучшение UX)
+        hint_text = "Требования: минимум 12 символов, заглавные и строчные буквы, цифры."
+        ttk.Label(tab_pass, text=hint_text, foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+
+        # Вкладка 3: Настройки шифрования (Заглушка)
+        tab_crypto = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_crypto, text="Шифрование")
+        ttk.Label(tab_crypto,
+                  text="[STUB] Параметры формирования ключа будут доступны в Спринте 3.\n\nИспользуется: AES-256-GCM").pack(
+            anchor=tk.W)
+
+        # Кнопки
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, pady=10, padx=10)
+        ttk.Button(btn_frame, text="Готово", command=self.on_complete).pack(side=tk.RIGHT)
+
+    def browse_db(self):
+        path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("SQLite DB", "*.db")])
+        if path:
+            self.db_path_var.set(path)
+
+    def on_complete(self):
+        path = self.db_path_var.get()
+        p1 = self.pass_entry.get()
+        p2 = self.pass_confirm.get()
+
+        if not path:
+            messagebox.showerror("Ошибка", "Укажите путь к базе данных.")
             return
 
-        ok, errs = PasswordValidator.validate(self.p1.get())
-        if not ok:
-            messagebox.showerror("Слабый пароль", "\n".join(errs))
+        if p1 != p2:
+            messagebox.showerror("Ошибка", "Пароли не совпадают.")
             return
 
-        # Создаём ключи и сохраняем
-        keys = self.km.setup_new_user(self.p1.get())
-        self.db.save_auth_data(keys['auth_hash'], keys['enc_salt'],
-                               keys.get('audit_salt'), keys.get('export_salt'))
+        # ИЗМЕНЕНО: Используем AuthenticationService для строгой проверки (HASH-4)
+        auth_service = AuthenticationService()
+        is_valid, msg = auth_service.validate_password_strength(p1)
 
-        # Вызываем callback и закрываем
-        self.on_finish(self.p1.get(), "path")
-        # НЕ вызываем self.destroy() здесь — это делает main.py
+        if not is_valid:
+            messagebox.showerror("Слабый пароль", msg)
+            return
+
+        # Сохраняем результаты как обычные строки
+        self.db_path = path
+        self.password = p1
+
+        self.completed = True
+        self.destroy()
