@@ -2,18 +2,21 @@ import tkinter as tk
 from tkinter import ttk
 
 
-class AuditLogViewer(tk.Toplevel):
-    """Окно логов (Заглушка Спринт 5)."""
+class AuditLogViewer(ttk.Frame):
+    """
+    Заглушка виджета для просмотра логов аудита.
+    """
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Логи аудита")
-        self.geometry("500x300")
 
-        tk.Label(self, text="Здесь будут логи (Спринт 5)").pack(pady=20)
+        self.text_area = tk.Text(self, state='disabled', wrap=tk.WORD)
+        self.text_area.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("Time", "Action")
-        tree = ttk.Treeview(self, columns=cols, show='headings')
-        for c in cols:
-            tree.heading(c, text=c)
-        tree.pack(fill=tk.BOTH, expand=True)
+        # Тестовая запись
+        self.log("[STUB] Инициализация модуля аудита.")
+
+    def log(self, message):
+        self.text_area.config(state='normal')
+        self.text_area.insert(tk.END, message + "\n")
+        self.text_area.config(state='disabled')
