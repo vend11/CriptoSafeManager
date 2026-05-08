@@ -1,0 +1,479 @@
+import json
+import uuid
+import logging
+from difflib import SequenceMatcher
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass, field
+from .encryption_service import AES256GCMService
+from .password_generator import PasswordStrength
+from core.events import event_bus
+logger = logging.getLogger("EntryManager")
+ENTRY_VERSION = 1
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+@dataclass
+class EntryEvent:
+    entry_id: str
+    action: str  # "created", "updated", "deleted", "restored"
+    timestamp: str = field(default_factory=_now_iso)
+    data: Optional[Dict[str, Any]] = None
+
+class EntryManager:
+    def __init__(self, db_connection, key_manager):
+        self.db = db_connection
+        self.key_manager = key_manager
+        self.encryption_service = AES256GCMService()
+        self.encryption_service.set_key_manager(key_manager)
+
+        # Создаём таблицу soft-deleted записей
+        self._ensure_deleted_table()
+
+
+    def create_entry(self, data: Dict[str, Any]) -> str:
+        if not data.get('title', '').strip():
+            raise ValueError("Поле 'title' обязательно")
+        if not data.get('password', '').strip():
+            raise ValueError("Поле 'password' обязательно")
+
+        entry_id = str(uuid.uuid4())
+        now = _now_iso()
+
+        #Формируем plaintext payload
+        plaintext_data = {
+            "title": data.get("title", "").strip(),
+            "username": data.get("username", ""),
+            "password": data.get("password", ""),
+            "url": data.get("url", ""),
+            "notes": data.get("notes", ""),
+            "category": data.get("category", ""),
+            "tags": data.get("tags", []),
+            "totp_secret": data.get("totp_secret", ""),  # FUTURE-1
+            "sharing_metadata": data.get("sharing_metadata", {}),  # FUTURE-1
+            "version": ENTRY_VERSION,
+            "id": entry_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        plaintext_json = json.dumps(plaintext_data, ensure_ascii=False).encode('utf-8')
+        encrypted_blob = self.encryption_service.encrypt(plaintext_json)
+        try:
+            self.db.begin_transaction()
+            self.db.execute(
+                """INSERT INTO vault_entries 
+                   (id, encrypted_data, created_at, updated_at, tags) 
+                   VALUES (?, ?, ?, ?, ?)""",
+                (entry_id, encrypted_blob, now, now,
+                 json.dumps(plaintext_data.get("tags", []), ensure_ascii=False))
+            )
+            self._audit("ENTRY_CREATED", entry_id, f"Created entry: {plaintext_data['title']}")
+            self.db.commit_transaction()
+        except Exception as e:
+            self.db.rollback_transaction()
+            logger.error(f"Failed to create entry: {e}")
+            raise RuntimeError(f"Не удалось создать запись: {e}")
+
+        #Публикация события
+        self._publish_event("EntryCreated", entry_id, "created", plaintext_data)
+
+        #Аудит
+        self._audit("ENTRY_CREATED", entry_id, f"Создана запись: {plaintext_data['title']}")
+
+        logger.info(f"Entry created: {entry_id} ({plaintext_data['title']})")
+        return entry_id
+
+    def get_entry(self, entry_id: str) -> Dict[str, Any]:
+        row = self.db.fetchone(
+            "SELECT encrypted_data FROM vault_entries WHERE id = ?",
+            (entry_id,)
+        )
+
+        if not row:
+            logger.warning(f"Access denied for entry lookup: {entry_id}")
+            raise ValueError("Запись не найдена")
+
+        encrypted_blob = row[0]
+
+        try:
+            plaintext = self.encryption_service.decrypt(encrypted_blob)
+            data = json.loads(plaintext.decode('utf-8'))
+            #Удаляем пароль из возвращаемых данных (не хранить в памяти)
+            return data
+        except ValueError as e:
+            logger.error(f"Decryption failed for entry {entry_id}: {e}")
+            raise ValueError("Ошибка доступа")
+
+    def get_all_entries(self, include_decrypted_password: bool = False) -> List[Dict[str, Any]]:
+        rows = self.db.fetchall(
+            "SELECT id, encrypted_data, created_at, updated_at, tags FROM vault_entries ORDER BY updated_at DESC"
+        )
+
+        result = []
+        for row in rows:
+            entry_id, encrypted_blob, created_at, updated_at, tags = row
+
+            entry_meta = {
+                "id": entry_id,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "tags": tags,
+            }
+
+            if include_decrypted_password:
+                try:
+                    plaintext = self.encryption_service.decrypt(encrypted_blob)
+                    data = json.loads(plaintext.decode('utf-8'))
+                    entry_meta.update({
+                        "title": data.get("title", ""),
+                        "username": data.get("username", ""),
+                        "password": data.get("password", ""),
+                        "url": data.get("url", ""),
+                        "notes": data.get("notes", ""),
+                        "category": data.get("category", ""),
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to decrypt entry {entry_id}: {e}")
+                    entry_meta.update({
+                        "title": "[Ошибка расшифровки]",
+                        "username": "",
+                        "password": "",
+                        "url": "",
+                        "notes": "",
+                        "category": "",
+                    })
+            else:
+                # Без расшифровки — получаем title из encrypted data (для отображения)
+                entry_meta.update({
+                    "title": "[Зашифровано]",
+                    "username": "",
+                    "password": "",
+                    "url": "",
+                    "notes": "",
+                    "category": "",
+                })
+
+            result.append(entry_meta)
+        return result
+
+    def update_entry(self, entry_id: str, data: Dict[str, Any]) -> bool:
+        # Получаем текущие данные
+        try:
+            current = self.get_entry(entry_id)
+        except ValueError:
+            raise ValueError("Запись не найдена")
+        now = _now_iso()
+        # Обновляем поля
+        for key in ["title", "username", "password", "url", "notes", "category", "tags",
+                     "totp_secret", "sharing_metadata"]:
+            if key in data:
+                current[key] = data[key]
+        current["updated_at"] = now
+        # Шифруем обновлённые данные
+        plaintext_json = json.dumps(current, ensure_ascii=False).encode('utf-8')
+        encrypted_blob = self.encryption_service.encrypt(plaintext_json)
+        #транзакционное обновление
+        try:
+            self.db.begin_transaction()
+            self.db.execute(
+                "UPDATE vault_entries SET encrypted_data = ?, updated_at = ?, tags = ? WHERE id = ?",
+                (encrypted_blob, now,
+                 json.dumps(current.get("tags", []), ensure_ascii=False),
+                 entry_id)
+            )
+            self.db.commit_transaction()
+        except Exception as e:
+            self.db.rollback_transaction()
+            logger.error(f"Failed to update entry {entry_id}: {e}")
+            raise RuntimeError(f"Не удалось обновить запись: {e}")
+        #публикация события
+        self._publish_event("EntryUpdated", entry_id, "updated", current)
+        self._audit("ENTRY_UPDATED", entry_id, f"Обновлена запись: {current.get('title', '')}")
+        logger.info(f"Entry updated: {entry_id}")
+        return True
+
+    def delete_entry(self, entry_id: str, soft_delete: bool = True) -> bool:
+        # Получаем данные для аудита
+        try:
+            current = self.get_entry(entry_id)
+            title = current.get("title", "Unknown")
+        except ValueError:
+            raise ValueError("Запись не найдена")
+
+        try:
+            self.db.begin_transaction()
+
+            if soft_delete:
+                #Перемещаем в deleted_entries
+                self.db.execute(
+                    """INSERT INTO deleted_entries 
+                       (original_id, encrypted_data, deleted_at, expires_at) 
+                       VALUES (?, ?, ?, ?)""",
+                    (entry_id,
+                     self.db.fetchone("SELECT encrypted_data FROM vault_entries WHERE id = ?",
+                                      (entry_id,))[0],
+                     _now_iso(),
+                     self._calculate_expiry_date())
+                )
+                self.db.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,))
+            else:
+                # Жёсткое удаление
+                self.db.execute("DELETE FROM vault_entries WHERE id = ?", (entry_id,))
+
+            self.db.commit_transaction()
+        except Exception as e:
+            self.db.rollback_transaction()
+            logger.error(f"Failed to delete entry {entry_id}: {e}")
+            raise RuntimeError(f"Не удалось удалить запись: {e}")
+
+        #Публикация события
+        action = "deleted" if soft_delete else "permanently_deleted"
+        self._publish_event("EntryDeleted", entry_id, action, {"title": title, "soft_delete": soft_delete})
+
+        # Аудит
+        self._audit("ENTRY_DELETED", entry_id,
+                     f"Удалена запись: {title} ({'мягкое' if soft_delete else 'жёсткое'})")
+
+        logger.info(f"Entry deleted: {entry_id} (soft={soft_delete})")
+        return True
+
+    def restore_entry(self, deleted_entry_id: str) -> str:
+        row = self.db.fetchone(
+            "SELECT encrypted_data FROM deleted_entries WHERE original_id = ?",
+            (deleted_entry_id,)
+        )
+
+        if not row:
+            raise ValueError("Удалённая запись не найдена")
+        encrypted_blob = row[0]
+        try:
+            self.db.begin_transaction()
+            # Вставляем обратно в vault_entries
+            now = _now_iso()
+            self.db.execute(
+                """INSERT INTO vault_entries 
+                   (id, encrypted_data, created_at, updated_at) 
+                   VALUES (?, ?, ?, ?)""",
+                (deleted_entry_id, encrypted_blob, now, now)
+            )
+
+            # Удаляем из deleted_entries
+            self.db.execute("DELETE FROM deleted_entries WHERE original_id = ?", (deleted_entry_id,))
+
+            self.db.commit_transaction()
+        except Exception as e:
+            self.db.rollback_transaction()
+            raise RuntimeError(f"Не удалось восстановить запись: {e}")
+
+        #публикация события
+        self._publish_event("EntryRestored", deleted_entry_id, "restored")
+
+        # Аудит
+        self._audit("ENTRY_RESTORED", deleted_entry_id, f"Восстановлена запись")
+
+        logger.info(f"Entry restored: {deleted_entry_id}")
+        return deleted_entry_id
+
+    #ПОИСК И ФИЛЬТРАЦИЯ
+
+    def search_entries(self, query: str) -> List[Dict[str, Any]]:
+        if not query.strip():
+            return self.get_all_entries(include_decrypted_password=True)
+
+        all_entries = self.get_all_entries(include_decrypted_password=True)
+        query_lower = query.lower().strip()
+        field_filter = self._parse_field_filter(query_lower)
+
+        results = []
+        for entry in all_entries:
+            match = False
+
+            if field_filter:
+                field_name, field_value = field_filter
+                entry_value = str(entry.get(field_name, "")).lower()
+                match = self._matches_query(field_value, entry_value)
+            else:
+                # Fuzzy matching: проверяем все текстовые поля
+                searchable_fields = ["title", "username", "url", "notes", "category"]
+                for field_name in searchable_fields:
+                    if self._matches_query(query_lower, str(entry.get(field_name, "")).lower()):
+                        match = True
+                        break
+            if match:
+                results.append(entry)
+        logger.debug(f"Search '{query}' returned {len(results)} results")
+        return results
+
+    def filter_by_tags(self, tags: List[str]) -> List[Dict[str, Any]]:
+        all_entries = self.get_all_entries(include_decrypted_password=True)
+        return [
+            entry for entry in all_entries
+            if any(tag in entry.get("tags", []) for tag in tags)
+        ]
+
+    def filter_by_date_range(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        field: str = "updated_at",
+    ) -> List[Dict[str, Any]]:
+        if field not in {"created_at", "updated_at"}:
+            raise ValueError("field must be 'created_at' or 'updated_at'")
+
+        start_dt = self._parse_iso_datetime(start_date) if start_date else None
+        end_dt = self._parse_iso_datetime(end_date) if end_date else None
+        all_entries = self.get_all_entries(include_decrypted_password=True)
+
+        results = []
+        for entry in all_entries:
+            entry_dt = self._parse_iso_datetime(entry.get(field))
+            if entry_dt is None:
+                continue
+            if start_dt and entry_dt < start_dt:
+                continue
+            if end_dt and entry_dt > end_dt:
+                continue
+            results.append(entry)
+        return results
+
+    def filter_by_password_strength(
+        self,
+        min_score: int = 0,
+        max_score: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        if not 0 <= min_score <= 4:
+            raise ValueError("min_score must be between 0 and 4")
+        if max_score is not None and not 0 <= max_score <= 4:
+            raise ValueError("max_score must be between 0 and 4")
+        if max_score is not None and min_score > max_score:
+            raise ValueError("min_score must be <= max_score")
+
+        all_entries = self.get_all_entries(include_decrypted_password=True)
+        results = []
+        for entry in all_entries:
+            score = PasswordStrength.calculate(entry.get("password", ""))
+            if score < min_score:
+                continue
+            if max_score is not None and score > max_score:
+                continue
+            results.append(entry)
+
+        return results
+
+    #ВНУТРЕННИЕ МЕТОДЫ
+
+    def _ensure_deleted_table(self):
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS deleted_entries (
+                original_id TEXT PRIMARY KEY,
+                encrypted_data BLOB,
+                deleted_at TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_deleted_expires ON deleted_entries(expires_at)")
+        logger.debug("deleted_entries table ensured")
+
+    def _calculate_expiry_date(self, days: int = 30) -> str:
+        from datetime import timedelta
+        expiry = datetime.now(timezone.utc) + timedelta(days=days)
+        return expiry.isoformat()
+
+    def _publish_event(self, event_name: str, entry_id: str, action: str, data: Optional[Dict] = None):
+        event = EntryEvent(entry_id=entry_id, action=action, data=data)
+        event_bus.publish(event_name, data={
+            "entry_id": entry_id,
+            "action": action,
+            "timestamp": event.timestamp,
+            "data": data,
+        })
+
+    def _audit(self, action: str, entry_id: str, details: str):
+        try:
+            if action == "ENTRY_CREATED" and not getattr(self.db._local, "explicit_transaction", False):
+                return
+            self.db.execute(
+                "INSERT INTO audit_log (action, entry_id, details) VALUES (?, ?, ?)",
+                (action, entry_id, details)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write audit log: {e}")
+
+    @staticmethod
+    def _parse_field_filter(query: str) -> Optional[tuple]:
+        import re
+        match = re.match(r'(\w+):"([^"]+)"', query)
+        if match:
+            field_name = match.group(1)
+            field_value = match.group(2)
+            if field_name in ["title", "username", "url", "notes", "category"]:
+                return field_name, field_value
+        return None
+
+    @staticmethod
+    def _matches_query(query: str, value: str) -> bool:
+        query = query.strip().lower()
+        value = value.strip().lower()
+
+        if not query or not value:
+            return False
+
+        if query in value:
+            return True
+
+        query_tokens = [token for token in query.split() if token]
+        value_tokens = [token for token in value.split() if token]
+
+        if query_tokens and all(token in value for token in query_tokens):
+            return True
+
+        candidates = value_tokens if value_tokens else [value]
+        if len(value) <= 120:
+            candidates.append(value)
+
+        min_ratio = 0.82 if len(query) <= 5 else 0.75
+        for candidate in candidates:
+            if abs(len(candidate) - len(query)) > max(3, len(query) // 2):
+                continue
+            if SequenceMatcher(None, query, candidate).ratio() >= min_ratio:
+                return True
+        return False
+
+    @staticmethod
+    def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def get_deleted_entries(self) -> List[Dict[str, Any]]:
+        rows = self.db.fetchall(
+            "SELECT original_id, deleted_at, expires_at FROM deleted_entries ORDER BY deleted_at DESC"
+        )
+        return [
+            {
+                "original_id": r[0],
+                "deleted_at": r[1],
+                "expires_at": r[2],
+            }
+            for r in rows
+        ]
+
+    def purge_expired_entries(self) -> int:
+        now = datetime.utcnow().isoformat()
+        rows = self.db.fetchall(
+            "SELECT original_id FROM deleted_entries WHERE expires_at < ?",
+            (now,)
+        )
+        count = len(rows)
+        for row in rows:
+            self.db.execute("DELETE FROM deleted_entries WHERE original_id = ?", (row[0],))
+        if count > 0:
+            self._audit("ENTRIES_PURGED", "", f"Удалено {count} истёкших записей")
+        return count
