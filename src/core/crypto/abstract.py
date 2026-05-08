@@ -1,18 +1,17 @@
-from abc import ABC, abstractmethod
-from typing import Optional, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from src.core.key_manager import KeyManager
+from abc import ABC, abstractmethod
 
 class EncryptionService(ABC):
     @abstractmethod
-    def set_key_manager(self, key_manager: "KeyManager"):
+    def encrypt(self, data: bytes) -> bytes:
+        """Зашифровать данные, используя ключ из KeyManager."""
         pass
 
     @abstractmethod
-    def encrypt(self, data: bytes, key: Optional[bytes] = None) -> bytes:
+    def decrypt(self, ciphertext: bytes) -> bytes:
+        """Расшифровать данные."""
         pass
 
-    @abstractmethod
-    def decrypt(self, ciphertext: bytes, key: Optional[bytes] = None) -> bytes:
-        pass
+    def set_key_manager(self, key_manager):
+        """ARC-2: Метод для внедрения KeyManager."""
+        self.key_manager = key_manager
